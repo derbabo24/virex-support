@@ -1,11 +1,1382 @@
-# Bot module
-# This file contains bot functionality
+# ============================================================
+#  VIREX BOT — bot.py
+#  Token refresh keeps backup tokens alive forever (no 7-day expiry)
+# ============================================================
+
+import discord
+from discord.ext import commands, tasks
+from discord import app_commands
+import json
+import os
+import asyncio
+import re
+import io
+import aiohttp
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
+import urllib.parse
+
+load_dotenv()
+
+# ============================================================
+#  CONFIG
+# ============================================================
+TOKEN                    = os.getenv("DISCORD_TOKEN", "")
+GUILD_ID                 = int(os.getenv("GUILD_ID", 0))
+TICKET_CATEGORY_ID       = int(os.getenv("TICKET_CATEGORY_ID", 0))
+TRANSCRIPT_CHANNEL_ID    = int(os.getenv("TRANSCRIPT_CHANNEL_ID", 0))
+STAFF_ROLE_IDS           = [int(x) for x in os.getenv("STAFF_ROLE_IDS", "").split(",") if x.strip().isdigit()]
+ADMIN_ROLE_IDS           = [int(x) for x in os.getenv("ADMIN_ROLE_IDS", "").split(",") if x.strip().isdigit()]
+AUTO_CLOSE_HOURS         = int(os.getenv("AUTO_CLOSE_HOURS", 24))
+VIREX_LOGO               = os.getenv("VIREX_LOGO", "").strip()
+VIREX_WEBSITE            = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
+VIREX_COLOR              = 0x00E5FF
+
+# OAuth2 / Verify
+CLIENT_ID                = os.getenv("DISCORD_CLIENT_ID", "")
+CLIENT_SECRET            = os.getenv("DISCORD_CLIENT_SECRET", "")
+WEB_BASE_URL             = os.getenv("WEB_BASE_URL", "http://localhost:5000")
+VERIFIED_ROLE_ID         = int(os.getenv("VERIFIED_ROLE_ID", 0))
+
+# Staff Applications
+APPLICATION_CHANNEL_ID   = int(os.getenv("APPLICATION_CHANNEL_ID", 0))
+APPLICATION_LOG_CHANNEL  = int(os.getenv("APPLICATION_LOG_CHANNEL", 0))
+
+TICKET_CATEGORIES = {
+    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",       "emoji": "🛒", "color": 0x00E5FF},
+    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.",  "emoji": "💰", "color": 0xFFD700},
+    "claim":    {"label": "Claim Role / Key",        "description": "Claim your role or product key.",     "emoji": "🔑", "color": 0x00FF88},
+    "hwid":     {"label": "HWID Reset",              "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xFF6B35},
+    "support":  {"label": "Get Support",             "description": "Request support from our staff.",     "emoji": "🎫", "color": 0x9B59B6},
+}
+
+# ============================================================
+#  LOGO HELPER
+# ============================================================
+def set_logo(embed: discord.Embed):
+    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
+        embed.set_thumbnail(url=VIREX_LOGO)
+
+# ============================================================
+#  STORAGE
+# ============================================================
+TICKETS_FILE      = "tickets.json"
+VERIFIED_FILE     = "verified.json"
+APPLICATIONS_FILE = "applications.json"
+
+def load_json(path):
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+tickets_data      = load_json(TICKETS_FILE)
+verified_data     = load_json(VERIFIED_FILE)
+applications_data = load_json(APPLICATIONS_FILE)
+
+# ============================================================
+#  PERMISSION HELPERS
+# ============================================================
+def is_staff(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    return any(r.id in STAFF_ROLE_IDS + ADMIN_ROLE_IDS for r in member.roles)
+
+def is_admin(member: discord.Member) -> bool:
+    if member.guild_permissions.administrator:
+        return True
+    return any(r.id in ADMIN_ROLE_IDS for r in member.roles)
+
+# ============================================================
+#  TOKEN REFRESH — keeps backup tokens alive FOREVER
+#  Discord tokens expire after 7 days. We refresh every 6 days.
+# ============================================================
+async def refresh_token(uid: str) -> bool:
+    """
+    Uses the stored refresh_token to get a new access_token.
+    Saves the updated tokens back to verified.json.
+    Returns True on success, False on failure.
+    """
+    info = verified_data.get(uid)
+    if not info:
+        return False
+    refresh_tok = info.get("refresh_token")
+    if not refresh_tok:
+        return False
+
+    data = {
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type":    "refresh_token",
+        "refresh_token": refresh_tok,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://discord.com/api/v10/oauth2/token",
+                data=data, headers=headers
+            ) as resp:
+                if resp.status == 200:
+                    token_data = await resp.json()
+                    verified_data[uid]["access_token"]  = token_data["access_token"]
+                    verified_data[uid]["refresh_token"] = token_data["refresh_token"]
+                    verified_data[uid]["token_refreshed_at"] = datetime.now(timezone.utc).isoformat()
+                    verified_data[uid].pop("token_expired", None)
+                    save_json(VERIFIED_FILE, verified_data)
+                    print(f"[TOKEN REFRESH] ✅ Refreshed token for user {uid}")
+                    return True
+                else:
+                    text = await resp.text()
+                    print(f"[TOKEN REFRESH] ❌ Failed for {uid}: {resp.status} {text}")
+                    verified_data[uid]["token_expired"] = True
+                    save_json(VERIFIED_FILE, verified_data)
+                    return False
+    except Exception as e:
+        print(f"[TOKEN REFRESH] ❌ Exception for {uid}: {e}")
+        return False
 
 
-def main():
-    """Main entry point for the bot."""
-    pass
+@tasks.loop(hours=6)
+async def token_refresh_loop():
+    """
+    Every 6 hours, refresh tokens that are approaching 7-day expiry.
+    Also refreshes any that were refreshed more than 6 days ago.
+    """
+    now = datetime.now(timezone.utc)
+    refreshed = 0
+    failed    = 0
+
+    for uid, info in list(verified_data.items()):
+        if not info.get("refresh_token"):
+            continue
+        if info.get("token_expired"):
+            continue
+
+        # Check when last refreshed (fall back to verified_at)
+        last_refresh_str = info.get("token_refreshed_at") or info.get("verified_at")
+        if not last_refresh_str:
+            continue
+
+        try:
+            last_refresh = datetime.fromisoformat(last_refresh_str)
+            if last_refresh.tzinfo is None:
+                last_refresh = last_refresh.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+
+        # Refresh if token is older than 6 days
+        if now - last_refresh >= timedelta(days=6):
+            success = await refresh_token(uid)
+            if success:
+                refreshed += 1
+            else:
+                failed += 1
+            await asyncio.sleep(0.5)  # rate limit safety
+
+    if refreshed or failed:
+        print(f"[TOKEN REFRESH] ✅ Refreshed: {refreshed} | ❌ Failed: {failed}")
 
 
+@token_refresh_loop.before_loop
+async def before_token_refresh():
+    await bot.wait_until_ready()
+
+
+# ============================================================
+#  GUILD JOIN HELPER
+# ============================================================
+async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] = None) -> dict:
+    uid  = str(user_id)
+    info = verified_data.get(uid)
+
+    if not info or not info.get("access_token"):
+        return {"status": "no_token", "detail": "User has not verified yet."}
+
+    # Try to refresh token first if it might be expired
+    last_refresh_str = info.get("token_refreshed_at") or info.get("verified_at")
+    if last_refresh_str:
+        try:
+            last = datetime.fromisoformat(last_refresh_str)
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - last >= timedelta(days=5):
+                print(f"[RESTORE] Token for {uid} is old, refreshing before restore...")
+                await refresh_token(uid)
+                info = verified_data.get(uid, info)
+        except Exception:
+            pass
+
+    access_token = info.get("access_token")
+    if not access_token:
+        return {"status": "no_token", "detail": "No access token available."}
+
+    payload = {"access_token": access_token}
+    if role_ids:
+        payload["roles"] = role_ids
+
+    headers = {"Authorization": f"Bot {TOKEN}", "Content-Type": "application/json"}
+    url     = f"https://discord.com/api/v10/guilds/{guild_id}/members/{user_id}"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.put(url, json=payload, headers=headers) as resp:
+            if resp.status in (200, 201):
+                return {"status": "added", "detail": "Successfully added to server."}
+            elif resp.status == 204:
+                return {"status": "already", "detail": "Already in server."}
+            elif resp.status == 401:
+                # Token expired — try refresh
+                print(f"[RESTORE] 401 for {uid}, attempting token refresh...")
+                refreshed = await refresh_token(uid)
+                if refreshed:
+                    # Retry with new token
+                    new_info  = verified_data.get(uid, {})
+                    payload["access_token"] = new_info.get("access_token", "")
+                    async with session.put(url, json=payload, headers=headers) as retry_resp:
+                        if retry_resp.status in (200, 201):
+                            return {"status": "added", "detail": "Added after token refresh."}
+                        elif retry_resp.status == 204:
+                            return {"status": "already", "detail": "Already in server."}
+                verified_data[uid]["token_expired"] = True
+                save_json(VERIFIED_FILE, verified_data)
+                return {"status": "token_expired", "detail": "Access token has expired. User needs to re-verify."}
+            else:
+                text = await resp.text()
+                return {"status": "error", "detail": f"API error {resp.status}: {text}"}
+
+# ============================================================
+#  HTML TRANSCRIPT GENERATOR
+# ============================================================
+def generate_transcript(channel, messages, guild):
+    cat_key = ""
+    if channel.topic and " | " in channel.topic:
+        parts = channel.topic.split(" | ")
+        if len(parts) > 1:
+            cat_key = parts[1].strip()
+    cat = TICKET_CATEGORIES.get(cat_key, {"label": "Support", "emoji": "🎫"})
+    msgs_html = ""
+    prev_id   = None
+    for msg in messages:
+        av  = str(msg.author.display_avatar.url) if msg.author.display_avatar else ""
+        stf = any(r.id in STAFF_ROLE_IDS + ADMIN_ROLE_IDS for r in getattr(msg.author, "roles", []))
+        if msg.author.id == guild.owner_id:
+            bdg = '<span class="badge owner">Owner</span>'
+        elif stf:
+            bdg = '<span class="badge staff">Staff</span>'
+        elif msg.author.bot:
+            bdg = '<span class="badge bot">BOT</span>'
+        else:
+            bdg = ""
+        att = ""
+        for a in msg.attachments:
+            if a.content_type and a.content_type.startswith("image"):
+                att += f'<img src="{a.url}" class="att-img" alt="img">'
+            else:
+                att += f'<a href="{a.url}" class="att-file" target="_blank">📎 {a.filename}</a>'
+        emb = ""
+        for e in msg.embeds:
+            ec = f"#{e.color.value:06x}" if e.color else "#00E5FF"
+            et = f"<div class='et'>{e.title}</div>" if e.title else ""
+            ed = f"<div class='ed'>{e.description}</div>" if e.description else ""
+            emb += f'<div class="emb" style="border-left-color:{ec}">{et}{ed}</div>'
+        txt = msg.content or ""
+        txt = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', txt)
+        txt = re.sub(r'\*(.+?)\*',     r'<em>\1</em>',         txt)
+        txt = re.sub(r'`(.+?)`',       r'<code>\1</code>',     txt)
+        txt = re.sub(r'https?://\S+',  lambda m: f'<a href="{m.group()}" target="_blank">{m.group()}</a>', txt)
+        ts   = msg.created_at.strftime("%d/%m/%Y %H:%M")
+        same = prev_id == msg.author.id
+        prev_id = msg.author.id
+        av_html  = f'<img src="{av}" class="av" alt="av">' if not same else '<div class="avs"></div>'
+        hdr_html = (f'<div class="mh"><span class="un">{msg.author.display_name}</span>'
+                    f'{bdg}<span class="ts">{ts}</span></div>') if not same else ""
+        msgs_html += (f'<div class="mg{"" if not same else " sa"}">'
+                      f'{av_html}<div class="mc">{hdr_html}<div class="mt">{txt}</div>{att}{emb}</div></div>')
+    logo_html = (f'<img src="{VIREX_LOGO}" class="hl" alt="Virex" onerror="this.style.display=\'none\'">'
+                 if VIREX_LOGO and VIREX_LOGO.startswith("https://") else "")
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Transcript — {channel.name}</title>
+<style>:root{{--bg:#050810;--s1:#080c18;--s2:#0d1120;--br:#141a2e;--bl:#00E5FF;--tx:#e0e8ff;--mu:#5a6580;--sg:#00ff88;--ow:#FFD700;--bt:#5865F2}}
+*{{box-sizing:border-box;margin:0;padding:0}}body{{background:var(--bg);color:var(--tx);font-family:'Inter',sans-serif;font-size:14px;line-height:1.6}}
+.hd{{background:linear-gradient(135deg,#04060f,#080c18);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
+.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px}}.hi p{{color:var(--mu);font-size:12px}}
+.hm{{margin-left:auto;font-size:11px;color:var(--mu)}}.hm strong{{color:var(--tx)}}
+.ms{{max-width:880px;margin:0 auto;padding:20px 40px}}.mg{{display:flex;gap:12px;padding:5px 8px;border-radius:8px;margin:1px -8px}}
+.av{{width:38px;height:38px;border-radius:50%;flex-shrink:0;border:1px solid var(--br)}}.avs{{width:38px;flex-shrink:0}}.mc{{flex:1}}
+.mh{{display:flex;align-items:center;gap:6px;margin-bottom:2px}}.un{{font-weight:600}}.ts{{font-size:10px;color:var(--mu)}}
+.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px}}.badge.staff{{background:rgba(0,255,136,.15);color:var(--sg)}}
+.badge.owner{{background:rgba(255,215,0,.15);color:var(--ow)}}.badge.bot{{background:rgba(88,101,242,.15);color:var(--bt)}}
+.mt{{color:#c0cce8;word-break:break-word}}.att-img{{max-width:380px;border-radius:8px;margin-top:6px;display:block}}
+.emb{{margin-top:6px;background:var(--s2);border-left:4px solid var(--bl);border-radius:4px;padding:8px 12px}}
+.ft{{text-align:center;padding:36px;border-top:1px solid var(--br);color:var(--mu);font-size:11px}}</style></head>
+<body><div class="hd">{logo_html}<div class="hi"><h1>VIREX</h1><p>{cat["emoji"]} {cat["label"]} • #{channel.name}</p></div>
+<div class="hm">Generated: <strong>{datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")} UTC</strong></div></div>
+<div class="ms">{msgs_html}</div>
+<div class="ft"><p><a href="{VIREX_WEBSITE}" style="color:var(--bl)">{VIREX_WEBSITE}</a></p></div>
+</body></html>"""
+
+# ============================================================
+#  CLOSE TICKET
+# ============================================================
+async def close_ticket(channel, guild, closed_by=None):
+    info = tickets_data.get(str(channel.id))
+    if not info:
+        try: await channel.delete()
+        except: pass
+        return
+    messages = [m async for m in channel.history(limit=500, oldest_first=True)]
+    html     = generate_transcript(channel, messages, guild)
+    tr_ch    = guild.get_channel(TRANSCRIPT_CHANNEL_ID)
+    if tr_ch:
+        user       = guild.get_member(info["user_id"])
+        cat        = TICKET_CATEGORIES.get(info.get("category", ""), {"label": "Support", "emoji": "🎫"})
+        user_str   = user.mention if user else f"<@{info['user_id']}>"
+        opened_ts  = int(datetime.fromisoformat(info["created_at"]).timestamp())
+        closed_str = closed_by.mention if closed_by else "Auto-Close ⏰"
+        embed = discord.Embed(
+            title=f"📋 Transcript — #{channel.name}",
+            description=(f"**User:** {user_str}\n**Category:** {cat['emoji']} {cat['label']}\n"
+                         f"**Opened:** <t:{opened_ts}:F>\n**Closed by:** {closed_str}\n**Messages:** {len(messages)}"),
+            color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_footer(text="Virex • Ticket System")
+        try:
+            await tr_ch.send(
+                embed=embed,
+                file=discord.File(io.BytesIO(html.encode()), filename=f"transcript-{channel.name}.html")
+            )
+        except Exception as e:
+            print(f"Transcript send error: {e}")
+    tickets_data[str(channel.id)]["status"] = "closed"
+    save_json(TICKETS_FILE, tickets_data)
+    try: await channel.delete()
+    except Exception as e: print(f"Channel delete error: {e}")
+
+# ============================================================
+#  STAFF APPLICATION — HELPERS
+# ============================================================
+async def notify_applicant(user_id: int, action: str, reason: str = ""):
+    try:
+        user = await bot.fetch_user(user_id)
+    except Exception:
+        return
+
+    if action == "accepted":
+        color = 0x00FF88
+        title = "✅ Staff Application — Accepted!"
+        desc  = (f"**Congratulations!** Your staff application at **Virex** has been **accepted**.\n\n"
+                 f"A staff member will contact you shortly with further instructions.\n\n"
+                 f"🌐 {VIREX_WEBSITE}")
+    elif action == "denied":
+        color = 0xFF4444
+        title = "❌ Staff Application — Denied"
+        desc  = ("Thank you for applying to **Virex**.\n\n"
+                 "Unfortunately your application was **not accepted** at this time.\n\n"
+                 + (f"**Reason:** {reason}\n\n" if reason else "")
+                 + "You're welcome to re-apply in the future. 💙")
+    elif action == "on_hold":
+        color = 0xFFD700
+        title = "⏸️ Staff Application — On Hold"
+        desc  = ("Your application at **Virex** has been placed **on hold**.\n\n"
+                 + (f"**Note:** {reason}\n\n" if reason else "")
+                 + "We will get back to you as soon as possible.")
+    else:
+        return
+
+    embed = discord.Embed(title=title, description=desc, color=color,
+                          timestamp=datetime.now(timezone.utc))
+    embed.set_footer(text="Virex • Staff Applications")
+    set_logo(embed)
+    try:
+        await user.send(embed=embed)
+    except discord.Forbidden:
+        pass
+
+
+async def update_application_embed(app_id: str, action: str, reviewer: discord.Member, reason: str = ""):
+    app_data = applications_data.get(app_id)
+    if not app_data:
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+    channel = guild.get_channel(app_data.get("channel_id", APPLICATION_CHANNEL_ID))
+    if not channel:
+        return
+    try:
+        msg = await channel.fetch_message(app_data["message_id"])
+    except Exception:
+        return
+
+    status_map = {
+        "accepted": ("✅ ACCEPTED", 0x00FF88),
+        "denied":   ("❌ DENIED",   0xFF4444),
+        "on_hold":  ("⏸️ ON HOLD",  0xFFD700),
+    }
+    status_label, color = status_map.get(action, ("❓ UNKNOWN", 0x888888))
+
+    old   = msg.embeds[0] if msg.embeds else None
+    embed = discord.Embed(title=old.title if old else "Staff Application", color=color,
+                          timestamp=datetime.now(timezone.utc))
+    if old:
+        for field in old.fields:
+            embed.add_field(name=field.name, value=field.value, inline=field.inline)
+
+    embed.add_field(
+        name="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        value=(f"**Status:** {status_label}\n"
+               f"**Reviewed by:** {reviewer.mention}\n"
+               f"**Reviewed at:** <t:{int(datetime.now(timezone.utc).timestamp())}:F>"
+               + (f"\n**Reason:** {reason}" if reason else "")),
+        inline=False
+    )
+    embed.set_footer(text=f"Application ID: {app_id} • Virex")
+    set_logo(embed)
+    await msg.edit(embed=embed, view=None)
+
+
+# ============================================================
+#  STAFF APPLICATION — MODALS
+# ============================================================
+class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
+    reason = discord.ui.TextInput(
+        label="Reason for denial (optional)",
+        placeholder="Enter a reason that will be sent to the applicant...",
+        required=False, max_length=500,
+        style=discord.TextStyle.paragraph
+    )
+
+    def __init__(self, app_id: str):
+        super().__init__()
+        self.app_id = app_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        app_data = applications_data.get(self.app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        reason_text = self.reason.value.strip()
+        applications_data[self.app_id].update({
+            "status": "denied", "reviewed_by": interaction.user.id,
+            "reviewed_at": datetime.now(timezone.utc).isoformat(), "deny_reason": reason_text
+        })
+        save_json(APPLICATIONS_FILE, applications_data)
+        await update_application_embed(self.app_id, "denied", interaction.user, reason_text)
+        await notify_applicant(app_data["discord_id"], "denied", reason_text)
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"❌ Application `{self.app_id}` denied."
+                            + (f"\n**Reason:** {reason_text}" if reason_text else ""),
+                color=0xFF4444), ephemeral=True)
+
+
+class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
+    reason = discord.ui.TextInput(
+        label="Note for the applicant (optional)",
+        placeholder="Enter a note that will be sent to the applicant...",
+        required=False, max_length=500,
+        style=discord.TextStyle.paragraph
+    )
+
+    def __init__(self, app_id: str):
+        super().__init__()
+        self.app_id = app_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        app_data = applications_data.get(self.app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        note_text = self.reason.value.strip()
+        applications_data[self.app_id].update({
+            "status": "on_hold", "reviewed_by": interaction.user.id,
+            "reviewed_at": datetime.now(timezone.utc).isoformat()
+        })
+        save_json(APPLICATIONS_FILE, applications_data)
+        await update_application_embed(self.app_id, "on_hold", interaction.user, note_text)
+        await notify_applicant(app_data["discord_id"], "on_hold", note_text)
+        await interaction.response.send_message(
+            embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.", color=0xFFD700),
+            ephemeral=True)
+
+
+# ============================================================
+#  STAFF APPLICATION — REVIEW VIEW
+# ============================================================
+class ApplicationReviewView(discord.ui.View):
+    def __init__(self, app_id: str):
+        super().__init__(timeout=None)
+        self.app_id = app_id
+
+    def _resolve_app_id(self, message_id: int) -> str:
+        for aid, adata in applications_data.items():
+            if adata.get("message_id") == message_id:
+                return aid
+        return self.app_id
+
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅",
+                       custom_id="app_accept")
+    async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+        app_id   = self._resolve_app_id(interaction.message.id)
+        app_data = applications_data.get(app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        if app_data.get("status") not in ("pending", "on_hold"):
+            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True)
+            return
+        applications_data[app_id].update({
+            "status": "accepted", "reviewed_by": interaction.user.id,
+            "reviewed_at": datetime.now(timezone.utc).isoformat()
+        })
+        save_json(APPLICATIONS_FILE, applications_data)
+        await update_application_embed(app_id, "accepted", interaction.user)
+        await notify_applicant(app_data["discord_id"], "accepted")
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"✅ Application `{app_id}` accepted! Applicant has been notified.",
+                color=0x00FF88), ephemeral=True)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌",
+                       custom_id="app_deny")
+    async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+        app_id   = self._resolve_app_id(interaction.message.id)
+        app_data = applications_data.get(app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        if app_data.get("status") not in ("pending", "on_hold"):
+            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True)
+            return
+        await interaction.response.send_modal(DenyReasonModal(app_id=app_id))
+
+    @discord.ui.button(label="On Hold", style=discord.ButtonStyle.secondary, emoji="⏸️",
+                       custom_id="app_hold")
+    async def hold_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+        app_id   = self._resolve_app_id(interaction.message.id)
+        app_data = applications_data.get(app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        if app_data.get("status") != "pending":
+            await interaction.response.send_message("❌ Already reviewed or on hold.", ephemeral=True)
+            return
+        await interaction.response.send_modal(OnHoldReasonModal(app_id=app_id))
+
+    @discord.ui.button(label="Open Interview", style=discord.ButtonStyle.primary, emoji="🎫",
+                       custom_id="app_interview")
+    async def interview_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+            return
+        app_id   = self._resolve_app_id(interaction.message.id)
+        app_data = applications_data.get(app_id)
+        if not app_data:
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            return
+        if applications_data[app_id].get("interview_channel"):
+            await interaction.response.send_message("❌ Interview channel already exists.", ephemeral=True)
+            return
+
+        guild        = interaction.guild
+        applicant_id = app_data.get("discord_id")
+        applicant    = guild.get_member(int(applicant_id)) if applicant_id else None
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                             manage_channels=True, read_message_history=True),
+        }
+        if applicant:
+            overwrites[applicant] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                  read_message_history=True)
+        for rid in STAFF_ROLE_IDS + ADMIN_ROLE_IDS:
+            role = guild.get_role(rid)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                 read_message_history=True)
+
+        cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
+        uname_slug  = app_data.get("discord_username", "applicant").lower().replace(" ", "-")
+        num         = len([c for c in guild.text_channels if c.name.startswith("app-")]) + 1
+        try:
+            channel = await guild.create_text_channel(
+                name=f"app-{uname_slug}-{num:03d}",
+                overwrites=overwrites,
+                category=cat_channel,
+                topic=f"Staff Application Interview | app_id:{app_id}"
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Could not create channel: {e}", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🎫 Staff Application — Interview Channel",
+            description=(f"Interview channel for {applicant.mention if applicant else f'<@{applicant_id}>'}.\n\n"
+                         f"**Application ID:** `{app_id}`\n"
+                         "Staff can use this channel to interview or discuss the application."),
+            color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        )
+        set_logo(embed)
+        await channel.send(
+            content=" ".join(filter(None, [interaction.user.mention, applicant.mention if applicant else ""])),
+            embed=embed
+        )
+
+        applications_data[app_id]["interview_channel"] = channel.id
+        save_json(APPLICATIONS_FILE, applications_data)
+
+        await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"✅ Interview channel created: {channel.mention}", color=VIREX_COLOR),
+            ephemeral=True)
+
+
+# ============================================================
+#  BACKGROUND TASK — POLL FOR NEW APPLICATIONS
+# ============================================================
+@tasks.loop(seconds=10)
+async def poll_applications():
+    global applications_data
+    fresh = load_json(APPLICATIONS_FILE)
+    for app_id, data in fresh.items():
+        if data.get("status") == "pending" and not data.get("message_id"):
+            applications_data[app_id] = data
+            await _post_application(app_id)
+
+@poll_applications.before_loop
+async def before_poll():
+    await bot.wait_until_ready()
+
+
+async def _post_application(app_id: str):
+    app_data = applications_data.get(app_id)
+    if not app_data:
+        return False
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        print("[APPS] Guild not found")
+        return False
+
+    channel = guild.get_channel(APPLICATION_CHANNEL_ID)
+    if not channel:
+        print(f"[APPS] APPLICATION_CHANNEL_ID {APPLICATION_CHANNEL_ID} not found")
+        return False
+
+    user_id      = app_data.get("discord_id", 0)
+    username     = app_data.get("discord_username", "Unknown")
+    submitted_ts = int(datetime.fromisoformat(app_data["submitted_at"]).timestamp())
+
+    embed = discord.Embed(
+        title=f"📋 Staff Application — {username}",
+        color=VIREX_COLOR,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"Application ID: {app_id} • Virex")
+    set_logo(embed)
+
+    embed.add_field(
+        name="👤 Applicant",
+        value=f"**Username:** {username}\n**Discord ID:** `{user_id}`\n**Submitted:** <t:{submitted_ts}:F>",
+        inline=False
+    )
+    embed.add_field(name="🎂 Age",                 value=app_data.get("age", "—"),            inline=True)
+    embed.add_field(name="🌍 Timezone",            value=app_data.get("timezone", "—"),        inline=True)
+    embed.add_field(name="🗣️ Languages",           value=app_data.get("languages", "—"),       inline=True)
+    embed.add_field(name="⏰ Weekly Availability", value=app_data.get("availability", "—"),    inline=True)
+    embed.add_field(name="📅 Discord Account Age", value=app_data.get("discord_since", "—"),  inline=True)
+    embed.add_field(name="🛡️ Previous Staff Exp.", value=app_data.get("previous_staff", "—"), inline=False)
+    embed.add_field(name="💡 Why Join Virex?",     value=app_data.get("why_valora", "—"),      inline=False)
+    embed.add_field(name="🔧 Skills & Strengths",  value=app_data.get("skills", "—"),          inline=False)
+    extra = app_data.get("extra", "") or "—"
+    embed.add_field(name="📌 Anything Else?",      value=extra,                                inline=False)
+
+    view = ApplicationReviewView(app_id=app_id)
+    try:
+        msg = await channel.send(embed=embed, view=view)
+        applications_data[app_id]["message_id"] = msg.id
+        applications_data[app_id]["channel_id"] = channel.id
+        save_json(APPLICATIONS_FILE, applications_data)
+        print(f"[APPS] ✅ Posted application {app_id} (msg {msg.id})")
+        return True
+    except Exception as e:
+        print(f"[APPS] ❌ Failed to post {app_id}: {e}")
+        return False
+
+
+# ============================================================
+#  VIEWS — TICKETS
+# ============================================================
+class TicketSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="Select a category to open a ticket...",
+            min_values=1, max_values=1, custom_id="virex_ticket_select",
+            options=[discord.SelectOption(label=v["label"], description=v["description"], emoji=v["emoji"], value=k)
+                     for k, v in TICKET_CATEGORIES.items()]
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        cat_key = self.values[0]
+        cat     = TICKET_CATEGORIES[cat_key]
+        guild   = interaction.guild
+        for ch in guild.text_channels:
+            if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
+                await interaction.response.send_message(
+                    f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
+                return
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            interaction.user:   discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
+        }
+        for rid in STAFF_ROLE_IDS + ADMIN_ROLE_IDS:
+            role = guild.get_role(rid)
+            if role:
+                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
+        num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+        try:
+            channel = await guild.create_text_channel(
+                name=f"ticket-{num:04d}", overwrites=overwrites, category=cat_channel,
+                topic=f"uid-{interaction.user.id} | {cat_key} | open"
+            )
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
+            return
+        tickets_data[str(channel.id)] = {
+            "user_id": interaction.user.id, "category": cat_key,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_activity": datetime.now(timezone.utc).isoformat(),
+            "auto_close": True, "status": "open"
+        }
+        save_json(TICKETS_FILE, tickets_data)
+        await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+        embed = discord.Embed(
+            title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
+            description=(f"Welcome, {interaction.user.mention}! 👋\n\n**Our support team will be with you shortly.**\n\n"
+                         f"🌐 **Website:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n\n"
+                         "Please describe your issue and we'll get back to you as soon as possible."),
+            color=cat["color"], timestamp=datetime.now(timezone.utc)
+        )
+        set_logo(embed)
+        embed.set_footer(text="Virex • Premium Products")
+        await channel.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
+
+
+class TicketPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketSelect())
+
+
+class TicketControlView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="virex_close_ticket")
+    async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        info = tickets_data.get(str(interaction.channel.id))
+        if not info:
+            await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+            return
+        if not is_staff(interaction.user) and info["user_id"] != interaction.user.id:
+            await interaction.response.send_message("❌ Only staff or the ticket owner can close this.", ephemeral=True)
+            return
+        await interaction.response.send_message("🔒 Closing in 5 seconds...")
+        await asyncio.sleep(5)
+        await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
+
+    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="virex_claim_ticket")
+    async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_staff(interaction.user):
+            await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=discord.Embed(
+            description=f"✋ **{interaction.user.mention}** has claimed this ticket!", color=VIREX_COLOR))
+
+
+class StoreView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="Visit Store", style=discord.ButtonStyle.link,
+                                        url=VIREX_WEBSITE, emoji="🌐", row=0))
+
+    @discord.ui.button(label="Open Purchase Ticket", style=discord.ButtonStyle.primary,
+                       emoji="🛒", custom_id="virex_store_ticket", row=1)
+    async def store_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view   = discord.ui.View(timeout=60)
+        select = TicketSelect()
+        select.options = [o for o in select.options if o.value == "purchase"]
+        view.add_item(select)
+        await interaction.response.send_message("Select ticket type:", view=view, ephemeral=True)
+
+
+# ============================================================
+#  VIEWS — VERIFY
+# ============================================================
+class VerifyView(discord.ui.View):
+    def __init__(self, oauth_url: str):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="Verify with Discord", style=discord.ButtonStyle.link,
+            url=oauth_url, emoji="🔐"
+        ))
+
+
+# ============================================================
+#  VIEWS — STAFF APPLY
+# ============================================================
+class StaffApplyView(discord.ui.View):
+    def __init__(self, apply_url: str):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label="Apply for Staff", style=discord.ButtonStyle.link,
+            url=apply_url, emoji="📋"
+        ))
+
+
+# ============================================================
+#  BOT
+# ============================================================
+intents = discord.Intents.default()
+intents.message_content = True
+intents.members         = True
+
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+# ============================================================
+#  BACKGROUND TASKS
+# ============================================================
+@tasks.loop(seconds=30)
+async def reload_verified_loop():
+    global verified_data
+    verified_data = load_json(VERIFIED_FILE)
+
+@reload_verified_loop.before_loop
+async def before_reload_verified():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=30)
+async def auto_close_task():
+    now = datetime.now(timezone.utc)
+    to_close = []
+    for cid, info in tickets_data.items():
+        if info.get("status") != "open":
+            continue
+        if not info.get("auto_close", True):
+            continue
+        last = datetime.fromisoformat(info["last_activity"])
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if now - last >= timedelta(hours=AUTO_CLOSE_HOURS):
+            to_close.append(cid)
+    for cid in to_close:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            continue
+        channel = guild.get_channel(int(cid))
+        if channel:
+            try:
+                await channel.send("⏰ Auto-closing due to inactivity...")
+                await close_ticket(channel, guild)
+            except Exception as e:
+                print(f"Auto-close error for {cid}: {e}")
+
+@auto_close_task.before_loop
+async def before_auto_close():
+    await bot.wait_until_ready()
+
+# ============================================================
+#  EVENTS
+# ============================================================
+@bot.event
+async def on_ready():
+    print(f"✅ Virex Bot online — {bot.user}")
+    await bot.change_presence(
+        activity=discord.Activity(type=discord.ActivityType.watching, name="Virex 🐻")
+    )
+    bot.add_view(TicketPanelView())
+    bot.add_view(TicketControlView())
+    bot.add_view(StoreView())
+
+    for app_id, data in applications_data.items():
+        if data.get("status") in ("pending", "on_hold") and data.get("message_id"):
+            bot.add_view(ApplicationReviewView(app_id=app_id))
+
+    if not reload_verified_loop.is_running():
+        reload_verified_loop.start()
+    if not auto_close_task.is_running():
+        auto_close_task.start()
+    if not poll_applications.is_running():
+        poll_applications.start()
+    if not token_refresh_loop.is_running():
+        token_refresh_loop.start()
+        print("🔄 Token refresh loop started (runs every 6h, keeps backup alive forever)")
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Synced {len(synced)} slash commands")
+    except Exception as e:
+        print(f"❌ Sync error: {e}")
+    print("✅ All Virex systems ready!")
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    cid = str(message.channel.id)
+    if cid in tickets_data and tickets_data[cid]["status"] == "open":
+        tickets_data[cid]["last_activity"] = datetime.now(timezone.utc).isoformat()
+        save_json(TICKETS_FILE, tickets_data)
+    await bot.process_commands(message)
+
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    uid = str(member.id)
+    if uid in verified_data:
+        verified_data[uid]["last_left_guild"] = str(member.guild.id)
+        verified_data[uid]["left_at"]         = datetime.now(timezone.utc).isoformat()
+        save_json(VERIFIED_FILE, verified_data)
+        print(f"[BACKUP] 📤 {member.name} ({uid}) left {member.guild.name} — token saved")
+
+# ============================================================
+#  SLASH — TICKETS
+# ============================================================
+@bot.tree.command(name="panel", description="Send the Virex ticket panel (Admin only)")
+@app_commands.guild_only()
+async def cmd_panel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(
+        title="🎫 Virex Support Tickets",
+        description=("**Need help? Open a ticket below!**\n\n"
+                     "🛒 **Purchase** — Help with buying a product\n"
+                     "💰 **Reseller** — Apply to our reseller program\n"
+                     "🔑 **Claim Key** — Claim your role or product key\n"
+                     "🔒 **HWID Reset** — Reset your hardware ID\n"
+                     "🎫 **Support** — General support\n\n"
+                     f"🌐 **Shop:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n*Select a category from the dropdown below.*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Premium Products 💎")
+    await interaction.channel.send(embed=embed, view=TicketPanelView())
+    await interaction.followup.send("✅ Panel sent!", ephemeral=True)
+
+
+@bot.tree.command(name="store", description="Send the Virex store panel (Admin only)")
+@app_commands.guild_only()
+async def cmd_store(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    embed = discord.Embed(
+        title="💎 VIREX",
+        description=("**Welcome to Virex — Premium Products & Services**\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                     f"🌐 **Website (Instant Delivery):**\n[**{VIREX_WEBSITE}**]({VIREX_WEBSITE})\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                     "💳 **Payment Methods**\n\n**🖥️ Website**\n"
+                     "├ 💳 Credit / Debit Card\n├  Apple Pay\n├ 🔷 iDEAL\n└ 🪙 Cryptocurrency\n\n"
+                     "**🎫 Ticket Orders**\n"
+                     "├ 💵 Cash App\n├ 🅿️ PayPal F&F\n├ 🎟️ Crypto Voucher\n└ 🟡 Binance Giftcards\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n*Questions? Open a support ticket!*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Premium Products 💎")
+    await interaction.channel.send(embed=embed, view=StoreView())
+    await interaction.followup.send("✅ Store panel sent!", ephemeral=True)
+
+
+@bot.tree.command(name="close", description="Close the current ticket (Staff only)")
+@app_commands.guild_only()
+async def cmd_close(interaction: discord.Interaction):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+    if str(interaction.channel.id) not in tickets_data:
+        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        return
+    await interaction.response.send_message("🔒 Closing in 5 seconds...")
+    await asyncio.sleep(5)
+    await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
+
+
+@bot.tree.command(name="add", description="Add a user to the current ticket (Staff only)")
+@app_commands.describe(user="User to add")
+@app_commands.guild_only()
+async def cmd_add(interaction: discord.Interaction, user: discord.Member):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+    if str(interaction.channel.id) not in tickets_data:
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+        return
+    await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f"✅ {user.mention} added.", color=discord.Color.green()))
+
+
+@bot.tree.command(name="remove", description="Remove a user from the current ticket (Staff only)")
+@app_commands.describe(user="User to remove")
+@app_commands.guild_only()
+async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+    if str(interaction.channel.id) not in tickets_data:
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+        return
+    await interaction.channel.set_permissions(user, overwrite=None)
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f"✅ {user.mention} removed.", color=discord.Color.red()))
+
+
+@bot.tree.command(name="autoclose", description="Enable or disable auto-close for this ticket (Staff only)")
+@app_commands.describe(enabled="True = on  |  False = off")
+@app_commands.guild_only()
+async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+    if str(interaction.channel.id) not in tickets_data:
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+        return
+    tickets_data[str(interaction.channel.id)]["auto_close"] = enabled
+    save_json(TICKETS_FILE, tickets_data)
+    status = "✅ enabled" if enabled else "❌ disabled"
+    await interaction.response.send_message(
+        embed=discord.Embed(description=f"Auto-close is now **{status}** for this ticket.", color=VIREX_COLOR))
+
+# ============================================================
+#  SLASH — VERIFY
+# ============================================================
+@bot.tree.command(name="verifypanel", description="Send the verification panel (Admin only)")
+@app_commands.guild_only()
+async def cmd_verifypanel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    redirect_uri     = f"{WEB_BASE_URL}/callback"
+    encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
+    oauth_url = (
+        "https://discord.com/oauth2/authorize"
+        f"?client_id={CLIENT_ID}"
+        f"&redirect_uri={encoded_redirect}"
+        "&response_type=code"
+        "&scope=identify%20guilds.join"
+    )
+    embed = discord.Embed(
+        title="🔐 Virex Verification",
+        description=("**Verify your Discord account to gain full access.**\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                     "🔒 **Why verify?**\n"
+                     "Keeps our server safe from bots and raiders.\n\n"
+                     "✅ **What happens?**\n"
+                     "You receive the **Verified** role and unlock all channels.\n\n"
+                     "🌐 **How?**\n"
+                     "Click the button — log in with Discord on our secure page.\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n"
+                     "*We do not store your password or personal data.*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Secure Verification 🔐")
+    await interaction.channel.send(embed=embed, view=VerifyView(oauth_url))
+    await interaction.followup.send("✅ Verify panel sent!", ephemeral=True)
+
+# ============================================================
+#  SLASH — STAFF APPLICATIONS
+# ============================================================
+@bot.tree.command(name="applypanel", description="Send the staff application panel (Admin only)")
+@app_commands.guild_only()
+async def cmd_applypanel(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    apply_url = f"{WEB_BASE_URL}/apply"
+    embed = discord.Embed(
+        title="📋 Staff Application — Virex",
+        description=("**Want to become part of the Virex team?**\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                     "👥 **What we're looking for:**\n"
+                     "├ Active & dedicated members\n"
+                     "├ Good communication skills\n"
+                     "├ Willingness to help customers\n"
+                     "└ Previous experience is a plus\n\n"
+                     "📋 **How to apply:**\n"
+                     "Click the button below, fill out the application form and submit it.\n"
+                     "Our team will review your application as soon as possible.\n\n"
+                     "━━━━━━━━━━━━━━━━━━━━━━━\n"
+                     "*All applications are reviewed manually by our admin team.*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Staff Applications 📋")
+    await interaction.channel.send(embed=embed, view=StaffApplyView(apply_url))
+    await interaction.followup.send("✅ Application panel sent!", ephemeral=True)
+
+
+@bot.tree.command(name="app_list", description="List all staff applications (Admin only)")
+@app_commands.guild_only()
+async def cmd_app_list(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if not applications_data:
+        await interaction.response.send_message("📭 No applications found.", ephemeral=True)
+        return
+
+    status_icons = {"pending": "⏳", "accepted": "✅", "denied": "❌", "on_hold": "⏸️"}
+    lines = []
+    for app_id, data in sorted(applications_data.items(),
+                                key=lambda x: x[1].get("submitted_at", ""), reverse=True):
+        icon  = status_icons.get(data.get("status", "pending"), "❓")
+        uname = data.get("discord_username", "Unknown")
+        uid   = data.get("discord_id", "?")
+        date  = data.get("submitted_at", "")[:10]
+        lines.append(f"{icon} `{app_id}` — **{uname}** (`{uid}`) — {date}")
+
+    chunks, chunk, length = [], [], 0
+    for line in lines:
+        if length + len(line) > 3800:
+            chunks.append(chunk); chunk, length = [line], len(line)
+        else:
+            chunk.append(line); length += len(line)
+    if chunk:
+        chunks.append(chunk)
+
+    for i, ch in enumerate(chunks):
+        embed = discord.Embed(
+            title=f"📋 Staff Applications {'(cont.)' if i > 0 else ''}",
+            description="\n".join(ch), color=VIREX_COLOR
+        )
+        if i == 0:
+            embed.set_footer(text=f"Total: {len(applications_data)} applications")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="app_stats", description="Show application statistics (Admin only)")
+@app_commands.guild_only()
+async def cmd_app_stats(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    total    = len(applications_data)
+    pending  = sum(1 for v in applications_data.values() if v.get("status") == "pending")
+    accepted = sum(1 for v in applications_data.values() if v.get("status") == "accepted")
+    denied   = sum(1 for v in applications_data.values() if v.get("status") == "denied")
+    on_hold  = sum(1 for v in applications_data.values() if v.get("status") == "on_hold")
+    embed = discord.Embed(
+        title="📊 Application Statistics",
+        description=(f"📋 **Total Applications:** `{total}`\n"
+                     f"⏳ **Pending:** `{pending}`\n"
+                     f"✅ **Accepted:** `{accepted}`\n"
+                     f"❌ **Denied:** `{denied}`\n"
+                     f"⏸️ **On Hold:** `{on_hold}`"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="Virex • Staff Applications")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ============================================================
+#  SLASH — BACKUP / RESTORE
+# ============================================================
+@bot.tree.command(name="backup_restore", description="Restore a single user back to this server (Admin only)")
+@app_commands.describe(user_id="Discord User ID of the person to restore")
+@app_commands.guild_only()
+async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if not user_id.strip().isdigit():
+        await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    result = await add_member_to_guild(int(user_id), interaction.guild.id)
+    colors = {"added": discord.Color.green(), "already": discord.Color.blue(),
+              "no_token": discord.Color.red(), "token_expired": discord.Color.orange(), "error": discord.Color.red()}
+    icons  = {"added": "✅", "already": "ℹ️", "no_token": "❌", "token_expired": "⚠️", "error": "❌"}
+    embed  = discord.Embed(
+        title=f"{icons.get(result['status'], '❓')} Backup Restore",
+        description=f"**User:** <@{user_id}>\n**Result:** {result['detail']}",
+        color=colors.get(result["status"], discord.Color.greyple()),
+        timestamp=datetime.now(timezone.utc)
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="backup_restore_all", description="Restore ALL verified users back to this server (Admin only)")
+@app_commands.guild_only()
+async def cmd_backup_restore_all(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if not verified_data:
+        await interaction.response.send_message("📭 No verified users in backup.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    added, already, failed, expired = [], [], [], []
+    total = len(verified_data)
+    for uid, info in verified_data.items():
+        result = await add_member_to_guild(int(uid), interaction.guild.id)
+        name   = info.get("username", uid)
+        if result["status"] == "added":           added.append(name)
+        elif result["status"] == "already":       already.append(name)
+        elif result["status"] == "token_expired": expired.append(name)
+        else:                                     failed.append(f"{name} — {result['detail']}")
+        await asyncio.sleep(0.5)
+
+    def fmt_list(lst, limit=20):
+        if not lst: return "—"
+        shown = lst[:limit]; extra = len(lst) - limit
+        text  = ", ".join(f"`{x}`" for x in shown)
+        if extra > 0: text += f" *+{extra} more*"
+        return text
+
+    embed = discord.Embed(
+        title="📦 Backup Restore — Complete",
+        description=(f"**Total in backup:** {total}\n\n"
+                     f"✅ **Added ({len(added)}):** {fmt_list(added)}\n\n"
+                     f"ℹ️ **Already in server ({len(already)}):** {fmt_list(already)}\n\n"
+                     f"⚠️ **Token expired ({len(expired)}):** {fmt_list(expired)}\n\n"
+                     f"❌ **Failed ({len(failed)}):** {fmt_list(failed)}"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text=f"Restore completed • {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')} UTC")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="backup_list", description="Show all users in the backup (Admin only)")
+@app_commands.guild_only()
+async def cmd_backup_list(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    if not verified_data:
+        await interaction.response.send_message("📭 Backup is empty.", ephemeral=True)
+        return
+    lines = []
+    for uid, info in verified_data.items():
+        name    = info.get("username", "unknown")
+        date    = info.get("verified_at", "")[:10]
+        refreshed = info.get("token_refreshed_at", "")[:10]
+        refresh_str = f" 🔄 refreshed {refreshed}" if refreshed else ""
+        expired = " ⚠️ token expired" if info.get("token_expired") else ""
+        left    = " 📤 left server"    if info.get("left_at")       else ""
+        lines.append(f"• `{name}` (<@{uid}>) — {date}{refresh_str}{expired}{left}")
+    chunks, chunk, length = [], [], 0
+    for line in lines:
+        if length + len(line) > 3800:
+            chunks.append(chunk); chunk, length = [line], len(line)
+        else:
+            chunk.append(line); length += len(line)
+    if chunk: chunks.append(chunk)
+    for i, ch in enumerate(chunks):
+        embed = discord.Embed(
+            title=f"📦 Backup List {'(cont.)' if i > 0 else ''}",
+            description="\n".join(ch), color=VIREX_COLOR
+        )
+        if i == 0:
+            embed.set_footer(text=f"Total: {len(verified_data)} users in backup")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="backup_stats", description="Show backup statistics (Admin only)")
+@app_commands.guild_only()
+async def cmd_backup_stats(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    total    = len(verified_data)
+    expired  = sum(1 for v in verified_data.values() if v.get("token_expired"))
+    left     = sum(1 for v in verified_data.values() if v.get("left_at"))
+    refreshed = sum(1 for v in verified_data.values() if v.get("token_refreshed_at"))
+    active   = total - expired
+    embed = discord.Embed(
+        title="📊 Backup Statistics",
+        description=(f"👥 **Total in backup:** `{total}`\n"
+                     f"✅ **Active tokens:** `{active}`\n"
+                     f"🔄 **Auto-refreshed tokens:** `{refreshed}`\n"
+                     f"⚠️ **Expired tokens:** `{expired}` *(users need to re-verify)*\n"
+                     f"📤 **Left server:** `{left}`\n\n"
+                     f"💡 *Token refresh runs every 6h — backup tokens stay alive forever.*\n"
+                     f"💡 *Use `/backup_restore_all` to restore everyone to this server.*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="Virex • Member Backup System")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="token_refresh_now", description="Force refresh all backup tokens now (Admin only)")
+@app_commands.guild_only()
+async def cmd_token_refresh_now(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    total     = len(verified_data)
+    refreshed = 0
+    failed    = 0
+    skipped   = 0
+
+    for uid, info in list(verified_data.items()):
+        if not info.get("refresh_token"):
+            skipped += 1
+            continue
+        if info.get("token_expired"):
+            # Try anyway in case they got a new token
+            pass
+        success = await refresh_token(uid)
+        if success:
+            refreshed += 1
+        else:
+            failed += 1
+        await asyncio.sleep(0.3)
+
+    embed = discord.Embed(
+        title="🔄 Token Refresh Complete",
+        description=(f"**Total users:** `{total}`\n"
+                     f"✅ **Refreshed:** `{refreshed}`\n"
+                     f"❌ **Failed:** `{failed}` *(user needs to re-verify)*\n"
+                     f"⏭️ **Skipped:** `{skipped}` *(no refresh token stored)*"),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="Virex • Token Management")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ============================================================
+#  RUN
+# ============================================================
 if __name__ == "__main__":
-    main()
+    bot.run(TOKEN)
