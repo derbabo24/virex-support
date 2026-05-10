@@ -3,6 +3,7 @@
 #  Token refresh keeps backup tokens alive forever (no 7-day expiry)
 # ============================================================
 
+import audioop  # noqa: F401 — audioop-lts shim for Python 3.13
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
