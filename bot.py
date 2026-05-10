@@ -61,9 +61,9 @@ def set_logo(embed: discord.Embed):
 # ============================================================
 #  STORAGE
 # ============================================================
-TICKETS_FILE      = "tickets.json"
-VERIFIED_FILE     = "verified.json"
-APPLICATIONS_FILE = "applications.json"
+TICKETS_FILE      = "/app/data/tickets.json"
+VERIFIED_FILE     = "/app/data/verified.json"
+APPLICATIONS_FILE = "/app/data/applications.json"
 
 def load_json(path):
     if os.path.exists(path):
