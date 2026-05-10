@@ -47,12 +47,12 @@ def give_role(user_id: str):
     if not BOT_TOKEN or VERIFIED_ROLE_ID == 0:
         print("⚠️ Missing BOT_TOKEN or VERIFIED_ROLE_ID")
         return
-    url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}"
-    res = requests.patch(url,
-        headers={"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"},
-        json={"roles": [VERIFIED_ROLE_ID]}
+    # PUT auf den spezifischen Role Endpoint — überschreibt keine anderen Rollen
+    url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ROLE_ID}"
+    res = requests.put(url,
+        headers={"Authorization": f"Bot {BOT_TOKEN}"}
     )
-    if res.status_code in (200, 204):
+    if res.status_code == 204:
         print(f"✅ Role given to {user_id}")
     else:
         print(f"❌ Role error {res.status_code}: {res.text}")
