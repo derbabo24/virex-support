@@ -26,8 +26,8 @@ VIREX_WEBSITE    = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
 REDIRECT_URI      = f"{WEB_BASE_URL}/callback"
 APPLY_OAUTH_URI   = f"{WEB_BASE_URL}/apply/callback"
 
-VERIFIED_FILE     = "verified.json"
-APPLICATIONS_FILE = "applications.json"
+VERIFIED_FILE     = "/app/data/verified.json"
+APPLICATIONS_FILE = "/app/data/applications.json"
 
 app = Flask(__name__)
 
