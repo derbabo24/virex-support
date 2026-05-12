@@ -1389,7 +1389,7 @@ async def cmd_backup_list(interaction: discord.Interaction):
     for uid, info in verified_data.items():
         name        = info.get("username", "unknown")
         date        = info.get("verified_at", "")[:10]
-        refreshed   = info.get("token_refreshed_at", "")[:10]
+        refreshed = (info.get("token_refreshed_at") or "")[:10]
         refresh_str = f" 🔄 refreshed {refreshed}" if refreshed else ""
         expired     = " ⚠️ token expired" if info.get("token_expired") else ""
         left        = " 📤 left server"    if info.get("left_at")       else ""
