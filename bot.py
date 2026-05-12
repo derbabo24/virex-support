@@ -1,6 +1,7 @@
-# ============================================================
+# ===========================================================
 #  VIREX BOT — bot.py
 #  Token refresh keeps backup tokens alive forever (no 7-day expiry)
+#  Join/Leave welcome channel added
 # ============================================================
 
 import audioop  # noqa: F401 — audioop-lts shim for Python 3.13
@@ -31,7 +32,13 @@ ADMIN_ROLE_IDS           = [int(x) for x in os.getenv("ADMIN_ROLE_IDS", "").spli
 AUTO_CLOSE_HOURS         = int(os.getenv("AUTO_CLOSE_HOURS", 24))
 VIREX_LOGO               = os.getenv("VIREX_LOGO", "").strip()
 VIREX_WEBSITE            = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
-VIREX_COLOR              = 0x00E5FF
+
+# Unified color palette based on VX logo (deep navy + electric blue + cyan glow)
+VIREX_COLOR              = 0x1A6FFF   # Electric blue — primary accent
+VIREX_COLOR_SUCCESS      = 0x1AE8A0   # Teal-green for success
+VIREX_COLOR_DANGER       = 0xE83A3A   # Soft red for errors/leave
+VIREX_COLOR_WARN         = 0xF0A500   # Amber for warnings/on-hold
+VIREX_COLOR_SUBTLE       = 0x1C2B50   # Dark navy for neutral embeds
 
 # OAuth2 / Verify
 CLIENT_ID                = os.getenv("DISCORD_CLIENT_ID", "")
@@ -43,18 +50,26 @@ VERIFIED_ROLE_ID         = int(os.getenv("VERIFIED_ROLE_ID", 0))
 APPLICATION_CHANNEL_ID   = int(os.getenv("APPLICATION_CHANNEL_ID", 0))
 APPLICATION_LOG_CHANNEL  = int(os.getenv("APPLICATION_LOG_CHANNEL", 0))
 
+# Welcome / Leave channel
+WELCOME_CHANNEL_ID       = int(os.getenv("WELCOME_CHANNEL_ID", 0))
+
 TICKET_CATEGORIES = {
-    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",       "emoji": "🛒", "color": 0x00E5FF},
-    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.",  "emoji": "💰", "color": 0xFFD700},
-    "claim":    {"label": "Claim Role / Key",        "description": "Claim your role or product key.",     "emoji": "🔑", "color": 0x00FF88},
-    "hwid":     {"label": "HWID Reset",              "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xFF6B35},
-    "support":  {"label": "Get Support",             "description": "Request support from our staff.",     "emoji": "🎫", "color": 0x9B59B6},
+    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",       "emoji": "🛒", "color": VIREX_COLOR},
+    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.",  "emoji": "💰", "color": 0xF0A500},
+    "claim":    {"label": "Claim Role / Key",        "description": "Claim your role or product key.",     "emoji": "🔑", "color": VIREX_COLOR_SUCCESS},
+    "hwid":     {"label": "HWID Reset",              "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xE07B39},
+    "support":  {"label": "Get Support",             "description": "Request support from our staff.",     "emoji": "🎫", "color": VIREX_COLOR},
 }
 
 # ============================================================
 #  LOGO HELPER
 # ============================================================
 def set_logo(embed: discord.Embed):
+    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
+        embed.set_thumbnail(url=VIREX_LOGO)
+
+def set_logo_large(embed: discord.Embed):
+    """Sets the logo as a large image (for welcome/leave embeds)."""
     if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
         embed.set_thumbnail(url=VIREX_LOGO)
 
@@ -97,11 +112,6 @@ def is_admin(member: discord.Member) -> bool:
 #  Discord tokens expire after 7 days. We refresh every 6 days.
 # ============================================================
 async def refresh_token(uid: str) -> bool:
-    """
-    Uses the stored refresh_token to get a new access_token.
-    Saves the updated tokens back to verified.json.
-    Returns True on success, False on failure.
-    """
     info = verified_data.get(uid)
     if not info:
         return False
@@ -145,10 +155,6 @@ async def refresh_token(uid: str) -> bool:
 
 @tasks.loop(hours=6)
 async def token_refresh_loop():
-    """
-    Every 6 hours, refresh tokens that are approaching 7-day expiry.
-    Also refreshes any that were refreshed more than 6 days ago.
-    """
     now = datetime.now(timezone.utc)
     refreshed = 0
     failed    = 0
@@ -159,7 +165,6 @@ async def token_refresh_loop():
         if info.get("token_expired"):
             continue
 
-        # Check when last refreshed (fall back to verified_at)
         last_refresh_str = info.get("token_refreshed_at") or info.get("verified_at")
         if not last_refresh_str:
             continue
@@ -171,14 +176,13 @@ async def token_refresh_loop():
         except Exception:
             continue
 
-        # Refresh if token is older than 6 days
         if now - last_refresh >= timedelta(days=6):
             success = await refresh_token(uid)
             if success:
                 refreshed += 1
             else:
                 failed += 1
-            await asyncio.sleep(0.5)  # rate limit safety
+            await asyncio.sleep(0.5)
 
     if refreshed or failed:
         print(f"[TOKEN REFRESH] ✅ Refreshed: {refreshed} | ❌ Failed: {failed}")
@@ -199,7 +203,6 @@ async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] =
     if not info or not info.get("access_token"):
         return {"status": "no_token", "detail": "User has not verified yet."}
 
-    # Try to refresh token first if it might be expired
     last_refresh_str = info.get("token_refreshed_at") or info.get("verified_at")
     if last_refresh_str:
         try:
@@ -231,11 +234,9 @@ async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] =
             elif resp.status == 204:
                 return {"status": "already", "detail": "Already in server."}
             elif resp.status == 401:
-                # Token expired — try refresh
                 print(f"[RESTORE] 401 for {uid}, attempting token refresh...")
                 refreshed = await refresh_token(uid)
                 if refreshed:
-                    # Retry with new token
                     new_info  = verified_data.get(uid, {})
                     payload["access_token"] = new_info.get("access_token", "")
                     async with session.put(url, json=payload, headers=headers) as retry_resp:
@@ -281,7 +282,7 @@ def generate_transcript(channel, messages, guild):
                 att += f'<a href="{a.url}" class="att-file" target="_blank">📎 {a.filename}</a>'
         emb = ""
         for e in msg.embeds:
-            ec = f"#{e.color.value:06x}" if e.color else "#00E5FF"
+            ec = f"#{e.color.value:06x}" if e.color else "#1A6FFF"
             et = f"<div class='et'>{e.title}</div>" if e.title else ""
             ed = f"<div class='ed'>{e.description}</div>" if e.description else ""
             emb += f'<div class="emb" style="border-left-color:{ec}">{et}{ed}</div>'
@@ -301,17 +302,17 @@ def generate_transcript(channel, messages, guild):
     logo_html = (f'<img src="{VIREX_LOGO}" class="hl" alt="Virex" onerror="this.style.display=\'none\'">'
                  if VIREX_LOGO and VIREX_LOGO.startswith("https://") else "")
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Transcript — {channel.name}</title>
-<style>:root{{--bg:#050810;--s1:#080c18;--s2:#0d1120;--br:#141a2e;--bl:#00E5FF;--tx:#e0e8ff;--mu:#5a6580;--sg:#00ff88;--ow:#FFD700;--bt:#5865F2}}
+<style>:root{{--bg:#04080F;--s1:#070C18;--s2:#0A1020;--br:#0F1830;--bl:#1A6FFF;--blg:#4D8FFF;--tx:#D8E4FF;--mu:#4A5878;--sg:#1AE8A0;--ow:#F0A500;--bt:#5865F2}}
 *{{box-sizing:border-box;margin:0;padding:0}}body{{background:var(--bg);color:var(--tx);font-family:'Inter',sans-serif;font-size:14px;line-height:1.6}}
-.hd{{background:linear-gradient(135deg,#04060f,#080c18);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
-.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px}}.hi p{{color:var(--mu);font-size:12px}}
+.hd{{background:linear-gradient(135deg,#04080F 0%,#071228 50%,#0A1A3A 100%);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
+.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl);box-shadow:0 0 12px rgba(26,111,255,0.4)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px;text-shadow:0 0 20px rgba(26,111,255,0.5)}}.hi p{{color:var(--mu);font-size:12px}}
 .hm{{margin-left:auto;font-size:11px;color:var(--mu)}}.hm strong{{color:var(--tx)}}
 .ms{{max-width:880px;margin:0 auto;padding:20px 40px}}.mg{{display:flex;gap:12px;padding:5px 8px;border-radius:8px;margin:1px -8px}}
 .av{{width:38px;height:38px;border-radius:50%;flex-shrink:0;border:1px solid var(--br)}}.avs{{width:38px;flex-shrink:0}}.mc{{flex:1}}
 .mh{{display:flex;align-items:center;gap:6px;margin-bottom:2px}}.un{{font-weight:600}}.ts{{font-size:10px;color:var(--mu)}}
-.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px}}.badge.staff{{background:rgba(0,255,136,.15);color:var(--sg)}}
-.badge.owner{{background:rgba(255,215,0,.15);color:var(--ow)}}.badge.bot{{background:rgba(88,101,242,.15);color:var(--bt)}}
-.mt{{color:#c0cce8;word-break:break-word}}.att-img{{max-width:380px;border-radius:8px;margin-top:6px;display:block}}
+.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px}}.badge.staff{{background:rgba(26,110,255,.15);color:var(--blg)}}
+.badge.owner{{background:rgba(240,165,0,.15);color:var(--ow)}}.badge.bot{{background:rgba(88,101,242,.15);color:var(--bt)}}
+.mt{{color:#A0B4E0;word-break:break-word}}.att-img{{max-width:380px;border-radius:8px;margin-top:6px;display:block}}
 .emb{{margin-top:6px;background:var(--s2);border-left:4px solid var(--bl);border-radius:4px;padding:8px 12px}}
 .ft{{text-align:center;padding:36px;border-top:1px solid var(--br);color:var(--mu);font-size:11px}}</style></head>
 <body><div class="hd">{logo_html}<div class="hi"><h1>VIREX</h1><p>{cat["emoji"]} {cat["label"]} • #{channel.name}</p></div>
@@ -345,6 +346,7 @@ async def close_ticket(channel, guild, closed_by=None):
             color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
         )
         embed.set_footer(text="Virex • Ticket System")
+        set_logo(embed)
         try:
             await tr_ch.send(
                 embed=embed,
@@ -367,20 +369,20 @@ async def notify_applicant(user_id: int, action: str, reason: str = ""):
         return
 
     if action == "accepted":
-        color = 0x00FF88
+        color = VIREX_COLOR_SUCCESS
         title = "✅ Staff Application — Accepted!"
         desc  = (f"**Congratulations!** Your staff application at **Virex** has been **accepted**.\n\n"
                  f"A staff member will contact you shortly with further instructions.\n\n"
                  f"🌐 {VIREX_WEBSITE}")
     elif action == "denied":
-        color = 0xFF4444
+        color = VIREX_COLOR_DANGER
         title = "❌ Staff Application — Denied"
         desc  = ("Thank you for applying to **Virex**.\n\n"
                  "Unfortunately your application was **not accepted** at this time.\n\n"
                  + (f"**Reason:** {reason}\n\n" if reason else "")
                  + "You're welcome to re-apply in the future. 💙")
     elif action == "on_hold":
-        color = 0xFFD700
+        color = VIREX_COLOR_WARN
         title = "⏸️ Staff Application — On Hold"
         desc  = ("Your application at **Virex** has been placed **on hold**.\n\n"
                  + (f"**Note:** {reason}\n\n" if reason else "")
@@ -415,9 +417,9 @@ async def update_application_embed(app_id: str, action: str, reviewer: discord.M
         return
 
     status_map = {
-        "accepted": ("✅ ACCEPTED", 0x00FF88),
-        "denied":   ("❌ DENIED",   0xFF4444),
-        "on_hold":  ("⏸️ ON HOLD",  0xFFD700),
+        "accepted": ("✅ ACCEPTED", VIREX_COLOR_SUCCESS),
+        "denied":   ("❌ DENIED",   VIREX_COLOR_DANGER),
+        "on_hold":  ("⏸️ ON HOLD",  VIREX_COLOR_WARN),
     }
     status_label, color = status_map.get(action, ("❓ UNKNOWN", 0x888888))
 
@@ -473,7 +475,7 @@ class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
             embed=discord.Embed(
                 description=f"❌ Application `{self.app_id}` denied."
                             + (f"\n**Reason:** {reason_text}" if reason_text else ""),
-                color=0xFF4444), ephemeral=True)
+                color=VIREX_COLOR_DANGER), ephemeral=True)
 
 
 class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
@@ -502,7 +504,7 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         await update_application_embed(self.app_id, "on_hold", interaction.user, note_text)
         await notify_applicant(app_data["discord_id"], "on_hold", note_text)
         await interaction.response.send_message(
-            embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.", color=0xFFD700),
+            embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.", color=VIREX_COLOR_WARN),
             ephemeral=True)
 
 
@@ -544,7 +546,7 @@ class ApplicationReviewView(discord.ui.View):
         await interaction.response.send_message(
             embed=discord.Embed(
                 description=f"✅ Application `{app_id}` accepted! Applicant has been notified.",
-                color=0x00FF88), ephemeral=True)
+                color=VIREX_COLOR_SUCCESS), ephemeral=True)
 
     @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌",
                        custom_id="app_deny")
@@ -911,7 +913,7 @@ async def before_auto_close():
 async def on_ready():
     print(f"✅ Virex Bot online — {bot.user}")
     await bot.change_presence(
-        activity=discord.Activity(type=discord.ActivityType.watching, name="Virex 🐻")
+        activity=discord.Activity(type=discord.ActivityType.watching, name="Virex 🔵")
     )
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
@@ -949,14 +951,92 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
+# ============================================================
+#  JOIN / LEAVE EVENTS
+# ============================================================
+@bot.event
+async def on_member_join(member: discord.Member):
+    """Sends a welcome embed when a member joins the server."""
+    if not WELCOME_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
+    if not channel:
+        return
+
+    member_count = member.guild.member_count
+    joined_ts    = int(member.joined_at.timestamp()) if member.joined_at else int(datetime.now(timezone.utc).timestamp())
+    account_ts   = int(member.created_at.timestamp())
+
+    embed = discord.Embed(
+        title="👋 Welcome to Virex!",
+        description=(
+            f"Hey {member.mention}, welcome to the **Virex** server! 🎉\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🔐 **Get started:** Verify your account to unlock all channels.\n"
+            f"🌐 **Shop:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n"
+            "🎫 **Support:** Open a ticket if you need help.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"*You are member **#{member_count}** — glad to have you!*"
+        ),
+        color=VIREX_COLOR,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_author(
+        name=f"{member.display_name} joined!",
+        icon_url=member.display_avatar.url if member.display_avatar else None
+    )
+    embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
+    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
+        embed.set_image(url=VIREX_LOGO)
+    embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>", inline=True)
+    embed.add_field(name="📥 Joined Server",   value=f"<t:{joined_ts}:R>",  inline=True)
+    embed.add_field(name="👥 Member Count",    value=f"`{member_count}`",   inline=True)
+    embed.set_footer(text="Virex • Welcome 🔵")
+
+    await channel.send(content=member.mention, embed=embed)
+
+
 @bot.event
 async def on_member_remove(member: discord.Member):
+    """Saves the token and sends a goodbye embed when a member leaves."""
+    # — Token backup (existing logic) —
     uid = str(member.id)
     if uid in verified_data:
         verified_data[uid]["last_left_guild"] = str(member.guild.id)
         verified_data[uid]["left_at"]         = datetime.now(timezone.utc).isoformat()
         save_json(VERIFIED_FILE, verified_data)
         print(f"[BACKUP] 📤 {member.name} ({uid}) left {member.guild.name} — token saved")
+
+    # — Leave message —
+    if not WELCOME_CHANNEL_ID:
+        return
+    channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
+    if not channel:
+        return
+
+    member_count = member.guild.member_count
+    account_ts   = int(member.created_at.timestamp())
+
+    embed = discord.Embed(
+        title="📤 Member Left",
+        description=(
+            f"**{member.display_name}** has left the server.\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"*We now have **{member_count}** members.*"
+        ),
+        color=VIREX_COLOR_DANGER,
+        timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_author(
+        name=f"{member.display_name} left",
+        icon_url=member.display_avatar.url if member.display_avatar else None
+    )
+    embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
+    embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>",  inline=True)
+    embed.add_field(name="👥 Members Now",     value=f"`{member_count}`",     inline=True)
+    embed.set_footer(text="Virex • Goodbye 🔵")
+
+    await channel.send(embed=embed)
 
 # ============================================================
 #  SLASH — TICKETS
@@ -1038,7 +1118,7 @@ async def cmd_add(interaction: discord.Interaction, user: discord.Member):
         return
     await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
     await interaction.response.send_message(
-        embed=discord.Embed(description=f"✅ {user.mention} added.", color=discord.Color.green()))
+        embed=discord.Embed(description=f"✅ {user.mention} added.", color=VIREX_COLOR_SUCCESS))
 
 
 @bot.tree.command(name="remove", description="Remove a user from the current ticket (Staff only)")
@@ -1053,7 +1133,7 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
         return
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(
-        embed=discord.Embed(description=f"✅ {user.mention} removed.", color=discord.Color.red()))
+        embed=discord.Embed(description=f"✅ {user.mention} removed.", color=VIREX_COLOR_DANGER))
 
 
 @bot.tree.command(name="autoclose", description="Enable or disable auto-close for this ticket (Staff only)")
@@ -1222,13 +1302,18 @@ async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
         return
     await interaction.response.defer(ephemeral=True)
     result = await add_member_to_guild(int(user_id), interaction.guild.id)
-    colors = {"added": discord.Color.green(), "already": discord.Color.blue(),
-              "no_token": discord.Color.red(), "token_expired": discord.Color.orange(), "error": discord.Color.red()}
+    colors = {
+        "added":         VIREX_COLOR_SUCCESS,
+        "already":       VIREX_COLOR,
+        "no_token":      VIREX_COLOR_DANGER,
+        "token_expired": VIREX_COLOR_WARN,
+        "error":         VIREX_COLOR_DANGER,
+    }
     icons  = {"added": "✅", "already": "ℹ️", "no_token": "❌", "token_expired": "⚠️", "error": "❌"}
     embed  = discord.Embed(
         title=f"{icons.get(result['status'], '❓')} Backup Restore",
         description=f"**User:** <@{user_id}>\n**Result:** {result['detail']}",
-        color=colors.get(result["status"], discord.Color.greyple()),
+        color=colors.get(result["status"], VIREX_COLOR_SUBTLE),
         timestamp=datetime.now(timezone.utc)
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1286,12 +1371,12 @@ async def cmd_backup_list(interaction: discord.Interaction):
         return
     lines = []
     for uid, info in verified_data.items():
-        name    = info.get("username", "unknown")
-        date    = info.get("verified_at", "")[:10]
+        name      = info.get("username", "unknown")
+        date      = info.get("verified_at", "")[:10]
         refreshed = info.get("token_refreshed_at", "")[:10]
         refresh_str = f" 🔄 refreshed {refreshed}" if refreshed else ""
-        expired = " ⚠️ token expired" if info.get("token_expired") else ""
-        left    = " 📤 left server"    if info.get("left_at")       else ""
+        expired   = " ⚠️ token expired" if info.get("token_expired") else ""
+        left      = " 📤 left server"    if info.get("left_at")       else ""
         lines.append(f"• `{name}` (<@{uid}>) — {date}{refresh_str}{expired}{left}")
     chunks, chunk, length = [], [], 0
     for line in lines:
@@ -1318,11 +1403,11 @@ async def cmd_backup_stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True)
         return
-    total    = len(verified_data)
-    expired  = sum(1 for v in verified_data.values() if v.get("token_expired"))
-    left     = sum(1 for v in verified_data.values() if v.get("left_at"))
+    total     = len(verified_data)
+    expired   = sum(1 for v in verified_data.values() if v.get("token_expired"))
+    left      = sum(1 for v in verified_data.values() if v.get("left_at"))
     refreshed = sum(1 for v in verified_data.values() if v.get("token_refreshed_at"))
-    active   = total - expired
+    active    = total - expired
     embed = discord.Embed(
         title="📊 Backup Statistics",
         description=(f"👥 **Total in backup:** `{total}`\n"
@@ -1354,9 +1439,6 @@ async def cmd_token_refresh_now(interaction: discord.Interaction):
         if not info.get("refresh_token"):
             skipped += 1
             continue
-        if info.get("token_expired"):
-            # Try anyway in case they got a new token
-            pass
         success = await refresh_token(uid)
         if success:
             refreshed += 1
