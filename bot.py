@@ -2,6 +2,8 @@
 #  VIREX BOT — bot.py
 #  Token refresh keeps backup tokens alive forever (no 7-day expiry)
 #  Join/Leave welcome channel added
+#  /smedia command added
+#  poll_applications race condition fixed
 # ============================================================
 
 import audioop  # noqa: F401 — audioop-lts shim for Python 3.13
@@ -33,7 +35,7 @@ AUTO_CLOSE_HOURS         = int(os.getenv("AUTO_CLOSE_HOURS", 24))
 VIREX_LOGO               = os.getenv("VIREX_LOGO", "").strip()
 VIREX_WEBSITE            = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
 
-# Unified color palette based on VX logo (deep navy + electric blue + cyan glow)
+# Unified color palette based on VX logo (deep navy + electric blue)
 VIREX_COLOR              = 0x1A6FFF   # Electric blue — primary accent
 VIREX_COLOR_SUCCESS      = 0x1AE8A0   # Teal-green for success
 VIREX_COLOR_DANGER       = 0xE83A3A   # Soft red for errors/leave
@@ -65,11 +67,6 @@ TICKET_CATEGORIES = {
 #  LOGO HELPER
 # ============================================================
 def set_logo(embed: discord.Embed):
-    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
-        embed.set_thumbnail(url=VIREX_LOGO)
-
-def set_logo_large(embed: discord.Embed):
-    """Sets the logo as a large image (for welcome/leave embeds)."""
     if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
         embed.set_thumbnail(url=VIREX_LOGO)
 
@@ -109,7 +106,6 @@ def is_admin(member: discord.Member) -> bool:
 
 # ============================================================
 #  TOKEN REFRESH — keeps backup tokens alive FOREVER
-#  Discord tokens expire after 7 days. We refresh every 6 days.
 # ============================================================
 async def refresh_token(uid: str) -> bool:
     info = verified_data.get(uid)
@@ -135,8 +131,8 @@ async def refresh_token(uid: str) -> bool:
             ) as resp:
                 if resp.status == 200:
                     token_data = await resp.json()
-                    verified_data[uid]["access_token"]  = token_data["access_token"]
-                    verified_data[uid]["refresh_token"] = token_data["refresh_token"]
+                    verified_data[uid]["access_token"]       = token_data["access_token"]
+                    verified_data[uid]["refresh_token"]      = token_data["refresh_token"]
                     verified_data[uid]["token_refreshed_at"] = datetime.now(timezone.utc).isoformat()
                     verified_data[uid].pop("token_expired", None)
                     save_json(VERIFIED_FILE, verified_data)
@@ -158,40 +154,31 @@ async def token_refresh_loop():
     now = datetime.now(timezone.utc)
     refreshed = 0
     failed    = 0
-
     for uid, info in list(verified_data.items()):
         if not info.get("refresh_token"):
             continue
         if info.get("token_expired"):
             continue
-
         last_refresh_str = info.get("token_refreshed_at") or info.get("verified_at")
         if not last_refresh_str:
             continue
-
         try:
             last_refresh = datetime.fromisoformat(last_refresh_str)
             if last_refresh.tzinfo is None:
                 last_refresh = last_refresh.replace(tzinfo=timezone.utc)
         except Exception:
             continue
-
         if now - last_refresh >= timedelta(days=6):
             success = await refresh_token(uid)
-            if success:
-                refreshed += 1
-            else:
-                failed += 1
+            if success: refreshed += 1
+            else:       failed    += 1
             await asyncio.sleep(0.5)
-
     if refreshed or failed:
         print(f"[TOKEN REFRESH] ✅ Refreshed: {refreshed} | ❌ Failed: {failed}")
-
 
 @token_refresh_loop.before_loop
 async def before_token_refresh():
     await bot.wait_until_ready()
-
 
 # ============================================================
 #  GUILD JOIN HELPER
@@ -199,7 +186,6 @@ async def before_token_refresh():
 async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] = None) -> dict:
     uid  = str(user_id)
     info = verified_data.get(uid)
-
     if not info or not info.get("access_token"):
         return {"status": "no_token", "detail": "User has not verified yet."}
 
@@ -230,18 +216,18 @@ async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] =
     async with aiohttp.ClientSession() as session:
         async with session.put(url, json=payload, headers=headers) as resp:
             if resp.status in (200, 201):
-                return {"status": "added", "detail": "Successfully added to server."}
+                return {"status": "added",   "detail": "Successfully added to server."}
             elif resp.status == 204:
                 return {"status": "already", "detail": "Already in server."}
             elif resp.status == 401:
                 print(f"[RESTORE] 401 for {uid}, attempting token refresh...")
                 refreshed = await refresh_token(uid)
                 if refreshed:
-                    new_info  = verified_data.get(uid, {})
+                    new_info = verified_data.get(uid, {})
                     payload["access_token"] = new_info.get("access_token", "")
                     async with session.put(url, json=payload, headers=headers) as retry_resp:
                         if retry_resp.status in (200, 201):
-                            return {"status": "added", "detail": "Added after token refresh."}
+                            return {"status": "added",   "detail": "Added after token refresh."}
                         elif retry_resp.status == 204:
                             return {"status": "already", "detail": "Already in server."}
                 verified_data[uid]["token_expired"] = True
@@ -291,8 +277,8 @@ def generate_transcript(channel, messages, guild):
         txt = re.sub(r'\*(.+?)\*',     r'<em>\1</em>',         txt)
         txt = re.sub(r'`(.+?)`',       r'<code>\1</code>',     txt)
         txt = re.sub(r'https?://\S+',  lambda m: f'<a href="{m.group()}" target="_blank">{m.group()}</a>', txt)
-        ts   = msg.created_at.strftime("%d/%m/%Y %H:%M")
-        same = prev_id == msg.author.id
+        ts      = msg.created_at.strftime("%d/%m/%Y %H:%M")
+        same    = prev_id == msg.author.id
         prev_id = msg.author.id
         av_html  = f'<img src="{av}" class="av" alt="av">' if not same else '<div class="avs"></div>'
         hdr_html = (f'<div class="mh"><span class="un">{msg.author.display_name}</span>'
@@ -305,7 +291,7 @@ def generate_transcript(channel, messages, guild):
 <style>:root{{--bg:#04080F;--s1:#070C18;--s2:#0A1020;--br:#0F1830;--bl:#1A6FFF;--blg:#4D8FFF;--tx:#D8E4FF;--mu:#4A5878;--sg:#1AE8A0;--ow:#F0A500;--bt:#5865F2}}
 *{{box-sizing:border-box;margin:0;padding:0}}body{{background:var(--bg);color:var(--tx);font-family:'Inter',sans-serif;font-size:14px;line-height:1.6}}
 .hd{{background:linear-gradient(135deg,#04080F 0%,#071228 50%,#0A1A3A 100%);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
-.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl);box-shadow:0 0 12px rgba(26,111,255,0.4)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px;text-shadow:0 0 20px rgba(26,111,255,0.5)}}.hi p{{color:var(--mu);font-size:12px}}
+.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl);box-shadow:0 0 12px rgba(26,111,255,0.4)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px}}.hi p{{color:var(--mu);font-size:12px}}
 .hm{{margin-left:auto;font-size:11px;color:var(--mu)}}.hm strong{{color:var(--tx)}}
 .ms{{max-width:880px;margin:0 auto;padding:20px 40px}}.mg{{display:flex;gap:12px;padding:5px 8px;border-radius:8px;margin:1px -8px}}
 .av{{width:38px;height:38px;border-radius:50%;flex-shrink:0;border:1px solid var(--br)}}.avs{{width:38px;flex-shrink:0}}.mc{{flex:1}}
@@ -404,7 +390,6 @@ async def update_application_embed(app_id: str, action: str, reviewer: discord.M
     app_data = applications_data.get(app_id)
     if not app_data:
         return
-
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         return
@@ -415,21 +400,18 @@ async def update_application_embed(app_id: str, action: str, reviewer: discord.M
         msg = await channel.fetch_message(app_data["message_id"])
     except Exception:
         return
-
     status_map = {
         "accepted": ("✅ ACCEPTED", VIREX_COLOR_SUCCESS),
         "denied":   ("❌ DENIED",   VIREX_COLOR_DANGER),
         "on_hold":  ("⏸️ ON HOLD",  VIREX_COLOR_WARN),
     }
     status_label, color = status_map.get(action, ("❓ UNKNOWN", 0x888888))
-
     old   = msg.embeds[0] if msg.embeds else None
     embed = discord.Embed(title=old.title if old else "Staff Application", color=color,
                           timestamp=datetime.now(timezone.utc))
     if old:
         for field in old.fields:
             embed.add_field(name=field.name, value=field.value, inline=field.inline)
-
     embed.add_field(
         name="━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         value=(f"**Status:** {status_label}\n"
@@ -442,7 +424,6 @@ async def update_application_embed(app_id: str, action: str, reviewer: discord.M
     set_logo(embed)
     await msg.edit(embed=embed, view=None)
 
-
 # ============================================================
 #  STAFF APPLICATION — MODALS
 # ============================================================
@@ -453,7 +434,6 @@ class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
         required=False, max_length=500,
         style=discord.TextStyle.paragraph
     )
-
     def __init__(self, app_id: str):
         super().__init__()
         self.app_id = app_id
@@ -485,7 +465,6 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         required=False, max_length=500,
         style=discord.TextStyle.paragraph
     )
-
     def __init__(self, app_id: str):
         super().__init__()
         self.app_id = app_id
@@ -504,9 +483,8 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         await update_application_embed(self.app_id, "on_hold", interaction.user, note_text)
         await notify_applicant(app_data["discord_id"], "on_hold", note_text)
         await interaction.response.send_message(
-            embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.", color=VIREX_COLOR_WARN),
-            ephemeral=True)
-
+            embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.",
+                                color=VIREX_COLOR_WARN), ephemeral=True)
 
 # ============================================================
 #  STAFF APPLICATION — REVIEW VIEW
@@ -522,20 +500,16 @@ class ApplicationReviewView(discord.ui.View):
                 return aid
         return self.app_id
 
-    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅",
-                       custom_id="app_accept")
+    @discord.ui.button(label="Accept", style=discord.ButtonStyle.success, emoji="✅", custom_id="app_accept")
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
         app_id   = self._resolve_app_id(interaction.message.id)
         app_data = applications_data.get(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
-            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True); return
         applications_data[app_id].update({
             "status": "accepted", "reviewed_by": interaction.user.id,
             "reviewed_at": datetime.now(timezone.utc).isoformat()
@@ -544,62 +518,48 @@ class ApplicationReviewView(discord.ui.View):
         await update_application_embed(app_id, "accepted", interaction.user)
         await notify_applicant(app_data["discord_id"], "accepted")
         await interaction.response.send_message(
-            embed=discord.Embed(
-                description=f"✅ Application `{app_id}` accepted! Applicant has been notified.",
-                color=VIREX_COLOR_SUCCESS), ephemeral=True)
+            embed=discord.Embed(description=f"✅ Application `{app_id}` accepted! Applicant notified.",
+                                color=VIREX_COLOR_SUCCESS), ephemeral=True)
 
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌",
-                       custom_id="app_deny")
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger, emoji="❌", custom_id="app_deny")
     async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
         app_id   = self._resolve_app_id(interaction.message.id)
         app_data = applications_data.get(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
-            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True); return
         await interaction.response.send_modal(DenyReasonModal(app_id=app_id))
 
-    @discord.ui.button(label="On Hold", style=discord.ButtonStyle.secondary, emoji="⏸️",
-                       custom_id="app_hold")
+    @discord.ui.button(label="On Hold", style=discord.ButtonStyle.secondary, emoji="⏸️", custom_id="app_hold")
     async def hold_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
         app_id   = self._resolve_app_id(interaction.message.id)
         app_data = applications_data.get(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") != "pending":
-            await interaction.response.send_message("❌ Already reviewed or on hold.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Already reviewed or on hold.", ephemeral=True); return
         await interaction.response.send_modal(OnHoldReasonModal(app_id=app_id))
 
-    @discord.ui.button(label="Open Interview", style=discord.ButtonStyle.primary, emoji="🎫",
-                       custom_id="app_interview")
+    @discord.ui.button(label="Open Interview", style=discord.ButtonStyle.primary, emoji="🎫", custom_id="app_interview")
     async def interview_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
         app_id   = self._resolve_app_id(interaction.message.id)
         app_data = applications_data.get(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if applications_data[app_id].get("interview_channel"):
-            await interaction.response.send_message("❌ Interview channel already exists.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Interview channel already exists.", ephemeral=True); return
 
         guild        = interaction.guild
         applicant_id = app_data.get("discord_id")
         applicant    = guild.get_member(int(applicant_id)) if applicant_id else None
-
-        overwrites = {
+        overwrites   = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True,
                                                              manage_channels=True, read_message_history=True),
@@ -612,20 +572,16 @@ class ApplicationReviewView(discord.ui.View):
             if role:
                 overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
                                                                  read_message_history=True)
-
         cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
         uname_slug  = app_data.get("discord_username", "applicant").lower().replace(" ", "-")
         num         = len([c for c in guild.text_channels if c.name.startswith("app-")]) + 1
         try:
             channel = await guild.create_text_channel(
-                name=f"app-{uname_slug}-{num:03d}",
-                overwrites=overwrites,
-                category=cat_channel,
-                topic=f"Staff Application Interview | app_id:{app_id}"
+                name=f"app-{uname_slug}-{num:03d}", overwrites=overwrites,
+                category=cat_channel, topic=f"Staff Application Interview | app_id:{app_id}"
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Could not create channel: {e}", ephemeral=True)
-            return
+            await interaction.response.send_message(f"❌ Could not create channel: {e}", ephemeral=True); return
 
         embed = discord.Embed(
             title="🎫 Staff Application — Interview Channel",
@@ -639,46 +595,60 @@ class ApplicationReviewView(discord.ui.View):
             content=" ".join(filter(None, [interaction.user.mention, applicant.mention if applicant else ""])),
             embed=embed
         )
-
         applications_data[app_id]["interview_channel"] = channel.id
         save_json(APPLICATIONS_FILE, applications_data)
-
         await interaction.response.send_message(
-            embed=discord.Embed(
-                description=f"✅ Interview channel created: {channel.mention}", color=VIREX_COLOR),
+            embed=discord.Embed(description=f"✅ Interview channel created: {channel.mention}", color=VIREX_COLOR),
             ephemeral=True)
-
 
 # ============================================================
 #  BACKGROUND TASK — POLL FOR NEW APPLICATIONS
+#
+#  FIX: _posting_in_progress set prevents the same application
+#  from being posted twice across concurrent loop ticks.
+#  We mark it BEFORE awaiting so the next tick can't re-enter.
 # ============================================================
+_posting_in_progress: set[str] = set()
+
 @tasks.loop(seconds=10)
 async def poll_applications():
     global applications_data
     fresh = load_json(APPLICATIONS_FILE)
     for app_id, data in fresh.items():
-        if data.get("status") == "pending" and not data.get("message_id"):
-            applications_data[app_id] = data
-            await _post_application(app_id)
+        if data.get("status") != "pending":
+            continue
+        if data.get("message_id"):
+            # Already posted — sync local cache if needed
+            if app_id not in applications_data:
+                applications_data[app_id] = data
+            continue
+        if app_id in _posting_in_progress:
+            continue
+        # Reserve slot BEFORE any await
+        _posting_in_progress.add(app_id)
+        applications_data[app_id] = data
+        success = await _post_application(app_id)
+        if not success:
+            _posting_in_progress.discard(app_id)  # allow retry
 
 @poll_applications.before_loop
 async def before_poll():
     await bot.wait_until_ready()
 
 
-async def _post_application(app_id: str):
+async def _post_application(app_id: str) -> bool:
     app_data = applications_data.get(app_id)
     if not app_data:
         return False
 
     guild = bot.get_guild(GUILD_ID)
     if not guild:
-        print("[APPS] Guild not found")
+        print(f"[APPS] ❌ Guild {GUILD_ID} not found")
         return False
 
     channel = guild.get_channel(APPLICATION_CHANNEL_ID)
     if not channel:
-        print(f"[APPS] APPLICATION_CHANNEL_ID {APPLICATION_CHANNEL_ID} not found")
+        print(f"[APPS] ❌ APPLICATION_CHANNEL_ID {APPLICATION_CHANNEL_ID} not found — check your .env!")
         return False
 
     user_id      = app_data.get("discord_id", 0)
@@ -692,7 +662,6 @@ async def _post_application(app_id: str):
     )
     embed.set_footer(text=f"Application ID: {app_id} • Virex")
     set_logo(embed)
-
     embed.add_field(
         name="👤 Applicant",
         value=f"**Username:** {username}\n**Discord ID:** `{user_id}`\n**Submitted:** <t:{submitted_ts}:F>",
@@ -715,12 +684,11 @@ async def _post_application(app_id: str):
         applications_data[app_id]["message_id"] = msg.id
         applications_data[app_id]["channel_id"] = channel.id
         save_json(APPLICATIONS_FILE, applications_data)
-        print(f"[APPS] ✅ Posted application {app_id} (msg {msg.id})")
+        print(f"[APPS] ✅ Posted application {app_id} → msg {msg.id} in #{channel.name}")
         return True
     except Exception as e:
         print(f"[APPS] ❌ Failed to post {app_id}: {e}")
         return False
-
 
 # ============================================================
 #  VIEWS — TICKETS
@@ -796,11 +764,9 @@ class TicketControlView(discord.ui.View):
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         info = tickets_data.get(str(interaction.channel.id))
         if not info:
-            await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
         if not is_staff(interaction.user) and info["user_id"] != interaction.user.id:
-            await interaction.response.send_message("❌ Only staff or the ticket owner can close this.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Only staff or the ticket owner can close this.", ephemeral=True); return
         await interaction.response.send_message("🔒 Closing in 5 seconds...")
         await asyncio.sleep(5)
         await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
@@ -808,8 +774,7 @@ class TicketControlView(discord.ui.View):
     @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="virex_claim_ticket")
     async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
-            await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True)
-            return
+            await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True); return
         await interaction.response.send_message(embed=discord.Embed(
             description=f"✋ **{interaction.user.mention}** has claimed this ticket!", color=VIREX_COLOR))
 
@@ -830,29 +795,18 @@ class StoreView(discord.ui.View):
         await interaction.response.send_message("Select ticket type:", view=view, ephemeral=True)
 
 
-# ============================================================
-#  VIEWS — VERIFY
-# ============================================================
 class VerifyView(discord.ui.View):
     def __init__(self, oauth_url: str):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
-            label="Verify with Discord", style=discord.ButtonStyle.link,
-            url=oauth_url, emoji="🔐"
-        ))
+            label="Verify with Discord", style=discord.ButtonStyle.link, url=oauth_url, emoji="🔐"))
 
 
-# ============================================================
-#  VIEWS — STAFF APPLY
-# ============================================================
 class StaffApplyView(discord.ui.View):
     def __init__(self, apply_url: str):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(
-            label="Apply for Staff", style=discord.ButtonStyle.link,
-            url=apply_url, emoji="📋"
-        ))
-
+            label="Apply for Staff", style=discord.ButtonStyle.link, url=apply_url, emoji="📋"))
 
 # ============================================================
 #  BOT
@@ -881,10 +835,8 @@ async def auto_close_task():
     now = datetime.now(timezone.utc)
     to_close = []
     for cid, info in tickets_data.items():
-        if info.get("status") != "open":
-            continue
-        if not info.get("auto_close", True):
-            continue
+        if info.get("status") != "open": continue
+        if not info.get("auto_close", True): continue
         last = datetime.fromisoformat(info["last_activity"])
         if last.tzinfo is None:
             last = last.replace(tzinfo=timezone.utc)
@@ -892,8 +844,7 @@ async def auto_close_task():
             to_close.append(cid)
     for cid in to_close:
         guild = bot.get_guild(GUILD_ID)
-        if not guild:
-            continue
+        if not guild: continue
         channel = guild.get_channel(int(cid))
         if channel:
             try:
@@ -918,20 +869,15 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(StoreView())
-
     for app_id, data in applications_data.items():
         if data.get("status") in ("pending", "on_hold") and data.get("message_id"):
             bot.add_view(ApplicationReviewView(app_id=app_id))
-
-    if not reload_verified_loop.is_running():
-        reload_verified_loop.start()
-    if not auto_close_task.is_running():
-        auto_close_task.start()
-    if not poll_applications.is_running():
-        poll_applications.start()
+    if not reload_verified_loop.is_running():  reload_verified_loop.start()
+    if not auto_close_task.is_running():       auto_close_task.start()
+    if not poll_applications.is_running():     poll_applications.start()
     if not token_refresh_loop.is_running():
         token_refresh_loop.start()
-        print("🔄 Token refresh loop started (runs every 6h, keeps backup alive forever)")
+        print("🔄 Token refresh loop started (runs every 6h)")
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash commands")
@@ -951,22 +897,16 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-# ============================================================
-#  JOIN / LEAVE EVENTS
-# ============================================================
 @bot.event
 async def on_member_join(member: discord.Member):
-    """Sends a welcome embed when a member joins the server."""
     if not WELCOME_CHANNEL_ID:
         return
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
     if not channel:
         return
-
     member_count = member.guild.member_count
     joined_ts    = int(member.joined_at.timestamp()) if member.joined_at else int(datetime.now(timezone.utc).timestamp())
     account_ts   = int(member.created_at.timestamp())
-
     embed = discord.Embed(
         title="👋 Welcome to Virex!",
         description=(
@@ -978,13 +918,10 @@ async def on_member_join(member: discord.Member):
             "━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*You are member **#{member_count}** — glad to have you!*"
         ),
-        color=VIREX_COLOR,
-        timestamp=datetime.now(timezone.utc)
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
     )
-    embed.set_author(
-        name=f"{member.display_name} joined!",
-        icon_url=member.display_avatar.url if member.display_avatar else None
-    )
+    embed.set_author(name=f"{member.display_name} joined!",
+                     icon_url=member.display_avatar.url if member.display_avatar else None)
     embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
     if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
         embed.set_image(url=VIREX_LOGO)
@@ -992,31 +929,24 @@ async def on_member_join(member: discord.Member):
     embed.add_field(name="📥 Joined Server",   value=f"<t:{joined_ts}:R>",  inline=True)
     embed.add_field(name="👥 Member Count",    value=f"`{member_count}`",   inline=True)
     embed.set_footer(text="Virex • Welcome 🔵")
-
     await channel.send(content=member.mention, embed=embed)
 
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    """Saves the token and sends a goodbye embed when a member leaves."""
-    # — Token backup (existing logic) —
     uid = str(member.id)
     if uid in verified_data:
         verified_data[uid]["last_left_guild"] = str(member.guild.id)
         verified_data[uid]["left_at"]         = datetime.now(timezone.utc).isoformat()
         save_json(VERIFIED_FILE, verified_data)
         print(f"[BACKUP] 📤 {member.name} ({uid}) left {member.guild.name} — token saved")
-
-    # — Leave message —
     if not WELCOME_CHANNEL_ID:
         return
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
     if not channel:
         return
-
     member_count = member.guild.member_count
     account_ts   = int(member.created_at.timestamp())
-
     embed = discord.Embed(
         title="📤 Member Left",
         description=(
@@ -1024,19 +954,76 @@ async def on_member_remove(member: discord.Member):
             "━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*We now have **{member_count}** members.*"
         ),
-        color=VIREX_COLOR_DANGER,
-        timestamp=datetime.now(timezone.utc)
+        color=VIREX_COLOR_DANGER, timestamp=datetime.now(timezone.utc)
     )
-    embed.set_author(
-        name=f"{member.display_name} left",
-        icon_url=member.display_avatar.url if member.display_avatar else None
-    )
+    embed.set_author(name=f"{member.display_name} left",
+                     icon_url=member.display_avatar.url if member.display_avatar else None)
     embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
-    embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>",  inline=True)
-    embed.add_field(name="👥 Members Now",     value=f"`{member_count}`",     inline=True)
+    embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>", inline=True)
+    embed.add_field(name="👥 Members Now",     value=f"`{member_count}`",   inline=True)
     embed.set_footer(text="Virex • Goodbye 🔵")
-
     await channel.send(embed=embed)
+
+
+# ============================================================
+#  on_interaction — handles the smedia ticket button
+# ============================================================
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    # Only handle component interactions not already handled by the tree
+    if interaction.type != discord.InteractionType.component:
+        return
+    if interaction.data.get("custom_id") != "virex_media_ticket":
+        return
+
+    guild = interaction.guild
+    for ch in guild.text_channels:
+        if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
+            await interaction.response.send_message(
+                f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
+            return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user:   discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+        guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
+    }
+    for rid in STAFF_ROLE_IDS + ADMIN_ROLE_IDS:
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+
+    cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
+    num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+    try:
+        ch = await guild.create_text_channel(
+            name=f"ticket-{num:04d}", overwrites=overwrites, category=cat_channel,
+            topic=f"uid-{interaction.user.id} | support | open"
+        )
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
+        return
+
+    tickets_data[str(ch.id)] = {
+        "user_id": interaction.user.id, "category": "support",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_activity": datetime.now(timezone.utc).isoformat(),
+        "auto_close": True, "status": "open"
+    }
+    save_json(TICKETS_FILE, tickets_data)
+    await interaction.response.send_message(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+
+    embed = discord.Embed(
+        title="🎬 Media Creator Application",
+        description=(f"Welcome, {interaction.user.mention}! 👋\n\n"
+                     "**You've applied for the Virex Media Creator program.**\n\n"
+                     "Please share your **channel link, follower count, average views** and any relevant clips below.\n"
+                     "Our team will review your profile and get back to you shortly."),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Media Creator Program 🎬")
+    await ch.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
 
 # ============================================================
 #  SLASH — TICKETS
@@ -1045,8 +1032,7 @@ async def on_member_remove(member: discord.Member):
 @app_commands.guild_only()
 async def cmd_panel(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(
         title="🎫 Virex Support Tickets",
@@ -1070,8 +1056,7 @@ async def cmd_panel(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_store(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(
         title="💎 VIREX",
@@ -1096,11 +1081,9 @@ async def cmd_store(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_close(interaction: discord.Interaction):
     if not is_staff(interaction.user):
-        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
     if str(interaction.channel.id) not in tickets_data:
-        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True); return
     await interaction.response.send_message("🔒 Closing in 5 seconds...")
     await asyncio.sleep(5)
     await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
@@ -1111,11 +1094,9 @@ async def cmd_close(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_add(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
-        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
     if str(interaction.channel.id) not in tickets_data:
-        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
     await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
     await interaction.response.send_message(
         embed=discord.Embed(description=f"✅ {user.mention} added.", color=VIREX_COLOR_SUCCESS))
@@ -1126,11 +1107,9 @@ async def cmd_add(interaction: discord.Interaction, user: discord.Member):
 @app_commands.guild_only()
 async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
-        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
     if str(interaction.channel.id) not in tickets_data:
-        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(
         embed=discord.Embed(description=f"✅ {user.mention} removed.", color=VIREX_COLOR_DANGER))
@@ -1141,16 +1120,73 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
 @app_commands.guild_only()
 async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
     if not is_staff(interaction.user):
-        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
     if str(interaction.channel.id) not in tickets_data:
-        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
     tickets_data[str(interaction.channel.id)]["auto_close"] = enabled
     save_json(TICKETS_FILE, tickets_data)
     status = "✅ enabled" if enabled else "❌ disabled"
     await interaction.response.send_message(
         embed=discord.Embed(description=f"Auto-close is now **{status}** for this ticket.", color=VIREX_COLOR))
+
+# ============================================================
+#  SLASH — SMEDIA  (Media Creator Announcement)
+# ============================================================
+@bot.tree.command(name="smedia", description="Send a Looking for Media Creators announcement (Admin only)")
+@app_commands.describe(
+    channel="Channel to send to (defaults to current channel)",
+    ping_everyone="Ping @everyone with the announcement (default: True)"
+)
+@app_commands.guild_only()
+async def cmd_smedia(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel = None,
+    ping_everyone: bool = True,
+):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
+        return
+
+    target = channel or interaction.channel
+    await interaction.response.defer(ephemeral=True)
+
+    embed = discord.Embed(
+        title="🎬 LOOKING FOR MEDIA CREATORS!",
+        description=(
+            "We are looking for **high quality applicants** who can promote our products consistently!\n"
+            "Ensure you meet the requirements before applying!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "📋 **Universal Requirements**\n"
+            "├ 🎥 Record in at least **1080p60fps**\n"
+            "├ 🎮 Be mechanically **good** at the game you're making media for\n"
+            "├ 💻 Be experienced in using **cheating software**\n"
+            "├ 📡 Interest in **LIVE streaming** is highly preferred\n"
+            "└ 👁️ Higher LIVE viewers = **higher weekly payouts**\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "🎫 **If you want to apply, open a ticket below!**"
+        ),
+        color=VIREX_COLOR,
+        timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+    embed.set_footer(text="Virex • Media Creator Program 🎬")
+
+    # Button that opens a ticket directly
+    view = discord.ui.View(timeout=None)
+    view.add_item(discord.ui.Button(
+        label="Apply — Open a Ticket",
+        style=discord.ButtonStyle.primary,
+        emoji="🎫",
+        custom_id="virex_media_ticket"
+    ))
+
+    content = "@everyone" if ping_everyone else None
+    try:
+        await target.send(content=content, embed=embed, view=view)
+        await interaction.followup.send(
+            f"✅ Media Creator announcement sent to {target.mention}!", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to send: {e}", ephemeral=True)
 
 # ============================================================
 #  SLASH — VERIFY
@@ -1159,8 +1195,7 @@ async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
 @app_commands.guild_only()
 async def cmd_verifypanel(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     redirect_uri     = f"{WEB_BASE_URL}/callback"
     encoded_redirect = urllib.parse.quote(redirect_uri, safe="")
@@ -1197,8 +1232,7 @@ async def cmd_verifypanel(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_applypanel(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     apply_url = f"{WEB_BASE_URL}/apply"
     embed = discord.Embed(
@@ -1227,12 +1261,9 @@ async def cmd_applypanel(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_app_list(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     if not applications_data:
-        await interaction.response.send_message("📭 No applications found.", ephemeral=True)
-        return
-
+        await interaction.response.send_message("📭 No applications found.", ephemeral=True); return
     status_icons = {"pending": "⏳", "accepted": "✅", "denied": "❌", "on_hold": "⏸️"}
     lines = []
     for app_id, data in sorted(applications_data.items(),
@@ -1242,16 +1273,13 @@ async def cmd_app_list(interaction: discord.Interaction):
         uid   = data.get("discord_id", "?")
         date  = data.get("submitted_at", "")[:10]
         lines.append(f"{icon} `{app_id}` — **{uname}** (`{uid}`) — {date}")
-
     chunks, chunk, length = [], [], 0
     for line in lines:
         if length + len(line) > 3800:
             chunks.append(chunk); chunk, length = [line], len(line)
         else:
             chunk.append(line); length += len(line)
-    if chunk:
-        chunks.append(chunk)
-
+    if chunk: chunks.append(chunk)
     for i, ch in enumerate(chunks):
         embed = discord.Embed(
             title=f"📋 Staff Applications {'(cont.)' if i > 0 else ''}",
@@ -1268,8 +1296,7 @@ async def cmd_app_list(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_app_stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     total    = len(applications_data)
     pending  = sum(1 for v in applications_data.values() if v.get("status") == "pending")
     accepted = sum(1 for v in applications_data.values() if v.get("status") == "accepted")
@@ -1295,20 +1322,13 @@ async def cmd_app_stats(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     if not user_id.strip().isdigit():
-        await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Invalid user ID.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     result = await add_member_to_guild(int(user_id), interaction.guild.id)
-    colors = {
-        "added":         VIREX_COLOR_SUCCESS,
-        "already":       VIREX_COLOR,
-        "no_token":      VIREX_COLOR_DANGER,
-        "token_expired": VIREX_COLOR_WARN,
-        "error":         VIREX_COLOR_DANGER,
-    }
+    colors = {"added": VIREX_COLOR_SUCCESS, "already": VIREX_COLOR,
+              "no_token": VIREX_COLOR_DANGER, "token_expired": VIREX_COLOR_WARN, "error": VIREX_COLOR_DANGER}
     icons  = {"added": "✅", "already": "ℹ️", "no_token": "❌", "token_expired": "⚠️", "error": "❌"}
     embed  = discord.Embed(
         title=f"{icons.get(result['status'], '❓')} Backup Restore",
@@ -1323,11 +1343,9 @@ async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
 @app_commands.guild_only()
 async def cmd_backup_restore_all(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     if not verified_data:
-        await interaction.response.send_message("📭 No verified users in backup.", ephemeral=True)
-        return
+        await interaction.response.send_message("📭 No verified users in backup.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     added, already, failed, expired = [], [], [], []
     total = len(verified_data)
@@ -1364,19 +1382,17 @@ async def cmd_backup_restore_all(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_backup_list(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     if not verified_data:
-        await interaction.response.send_message("📭 Backup is empty.", ephemeral=True)
-        return
+        await interaction.response.send_message("📭 Backup is empty.", ephemeral=True); return
     lines = []
     for uid, info in verified_data.items():
-        name      = info.get("username", "unknown")
-        date      = info.get("verified_at", "")[:10]
-        refreshed = info.get("token_refreshed_at", "")[:10]
+        name        = info.get("username", "unknown")
+        date        = info.get("verified_at", "")[:10]
+        refreshed   = info.get("token_refreshed_at", "")[:10]
         refresh_str = f" 🔄 refreshed {refreshed}" if refreshed else ""
-        expired   = " ⚠️ token expired" if info.get("token_expired") else ""
-        left      = " 📤 left server"    if info.get("left_at")       else ""
+        expired     = " ⚠️ token expired" if info.get("token_expired") else ""
+        left        = " 📤 left server"    if info.get("left_at")       else ""
         lines.append(f"• `{name}` (<@{uid}>) — {date}{refresh_str}{expired}{left}")
     chunks, chunk, length = [], [], 0
     for line in lines:
@@ -1401,8 +1417,7 @@ async def cmd_backup_list(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_backup_stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     total     = len(verified_data)
     expired   = sum(1 for v in verified_data.values() if v.get("token_expired"))
     left      = sum(1 for v in verified_data.values() if v.get("left_at"))
@@ -1427,25 +1442,17 @@ async def cmd_backup_stats(interaction: discord.Interaction):
 @app_commands.guild_only()
 async def cmd_token_refresh_now(interaction: discord.Interaction):
     if not is_admin(interaction.user):
-        await interaction.response.send_message("❌ Admin only.", ephemeral=True)
-        return
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    total     = len(verified_data)
-    refreshed = 0
-    failed    = 0
-    skipped   = 0
-
+    total = len(verified_data)
+    refreshed = failed = skipped = 0
     for uid, info in list(verified_data.items()):
         if not info.get("refresh_token"):
-            skipped += 1
-            continue
+            skipped += 1; continue
         success = await refresh_token(uid)
-        if success:
-            refreshed += 1
-        else:
-            failed += 1
+        if success: refreshed += 1
+        else:       failed    += 1
         await asyncio.sleep(0.3)
-
     embed = discord.Embed(
         title="🔄 Token Refresh Complete",
         description=(f"**Total users:** `{total}`\n"
