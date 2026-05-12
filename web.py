@@ -21,6 +21,7 @@ WEB_BASE_URL     = os.getenv("WEB_BASE_URL", "https://your-app.up.railway.app")
 GUILD_ID         = int(os.getenv("GUILD_ID", 0))
 BOT_TOKEN        = os.getenv("DISCORD_TOKEN", "")
 VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID", 0))
+STAFF_CHANNEL_ID = int(os.getenv("STAFF_CHANNEL_ID", 0))
 VIREX_WEBSITE    = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
 
 REDIRECT_URI      = f"{WEB_BASE_URL}/callback"
@@ -56,6 +57,64 @@ def give_role(user_id: str):
         print(f"✅ Role given to {user_id}")
     else:
         print(f"❌ Role error {res.status_code}: {res.text}")
+
+
+def send_application_to_discord(
+    discord_id, username, age, timezone, languages, availability,
+    discord_since, previous_staff, why_valora, skills, extra, app_id
+) -> int | None:
+    """Send a formatted staff application embed to STAFF_CHANNEL_ID.
+
+    Returns the Discord message ID on success, or None on failure.
+    """
+    if not BOT_TOKEN or STAFF_CHANNEL_ID == 0:
+        print("⚠️ Missing BOT_TOKEN or STAFF_CHANNEL_ID — skipping Discord notification")
+        return None
+
+    def field(name, value, inline=False):
+        return {"name": name, "value": str(value) or "—", "inline": inline}
+
+    embed = {
+        "title": "📋  New Staff Application",
+        "color": 0x00E5FF,
+        "fields": [
+            field("Applicant",        f"<@{discord_id}> (`{username}` · `{discord_id}`)", inline=False),
+            field("Age",              age,            inline=True),
+            field("Timezone",         timezone,       inline=True),
+            field("Languages",        languages,      inline=True),
+            field("Availability",     availability,   inline=True),
+            field("Discord since",    discord_since,  inline=True),
+            field("Previous staff experience", previous_staff or "—", inline=False),
+            field("Why Virex?",       why_valora,     inline=False),
+            field("Skills",           skills,         inline=False),
+        ],
+        "footer": {"text": f"Application ID: {app_id}"},
+    }
+
+    # Build timestamp after aliasing — the `timezone` parameter shadows datetime.timezone
+    from datetime import timezone as _tz
+    embed["timestamp"] = datetime.now(_tz.utc).isoformat()
+
+    if extra:
+        embed["fields"].append(field("Additional info", extra, inline=False))
+
+    url = f"https://discord.com/api/v10/channels/{STAFF_CHANNEL_ID}/messages"
+    res = requests.post(
+        url,
+        json={"embeds": [embed]},
+        headers={
+            "Authorization": f"Bot {BOT_TOKEN}",
+            "Content-Type":  "application/json",
+        },
+    )
+
+    if res.status_code == 200:
+        message_id = res.json().get("id")
+        print(f"✅ Application {app_id} posted to Discord channel {STAFF_CHANNEL_ID} (msg {message_id})")
+        return message_id
+    else:
+        print(f"❌ Failed to post application {app_id} to Discord: {res.status_code} {res.text}")
+        return None
 
 
 def exchange_code(code: str, redirect_uri: str) -> dict | None:
@@ -766,6 +825,26 @@ def apply_submit():
     }
     save_json(APPLICATIONS_FILE, apps)
     print(f"📋 New application: {app_id} from {discord_username} ({discord_id})")
+
+    # Post to Discord staff channel and persist the returned message/channel IDs
+    message_id = send_application_to_discord(
+        discord_id     = discord_id,
+        username       = discord_username,
+        age            = apps[app_id]["age"],
+        timezone       = apps[app_id]["timezone"],
+        languages      = apps[app_id]["languages"],
+        availability   = apps[app_id]["availability"],
+        discord_since  = apps[app_id]["discord_since"],
+        previous_staff = apps[app_id]["previous_staff"],
+        why_valora     = apps[app_id]["why_valora"],
+        skills         = apps[app_id]["skills"],
+        extra          = apps[app_id]["extra"],
+        app_id         = app_id,
+    )
+    if message_id:
+        apps[app_id]["message_id"] = message_id
+        apps[app_id]["channel_id"] = STAFF_CHANNEL_ID
+        save_json(APPLICATIONS_FILE, apps)
 
     return render_template_string(APPLY_SUCCESS_HTML,
         username=discord_username, app_id=app_id, website=VIREX_WEBSITE)
