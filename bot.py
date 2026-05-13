@@ -180,6 +180,35 @@ async def token_refresh_loop():
 async def before_token_refresh():
     await bot.wait_until_ready()
 
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+@bot.event
+async def on_message(message):
+    # Eigene Bot-Nachrichten ignorieren
+    if message.author == bot.user:
+        return
+
+    # Prüfen ob Nachricht mit * beginnt
+    if message.content.startswith("*"):
+        # Prefix entfernen
+        text = message.content[1:]
+
+        # Originalnachricht löschen
+        await message.delete()
+
+        # Nachricht als Bot senden
+        await message.channel.send(text)
+
+    await bot.process_commands(message)
+
+
+
+
+
 # ============================================================
 #  GUILD JOIN HELPER
 # ============================================================
