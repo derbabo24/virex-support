@@ -138,6 +138,9 @@ async def db_get_verified(user_id: str) -> dict | None:
     d = dict(row)
     extra = d.pop("extra", {}) or {}
     # Merge extra fields back in
+    if not isinstance(extra, dict):
+        print(f"⚠️  db_get_verified: non-dict extra for user {d.get('user_id')!r}, skipping merge (got {type(extra).__name__!r})")
+        extra = {}
     d.update(extra)
     # Convert timestamps to ISO strings for compatibility
     for k in ("verified_at", "token_refreshed_at", "left_at"):
@@ -204,6 +207,9 @@ async def db_all_verified() -> dict:
         d = dict(row)
         uid = d.pop("user_id")
         extra = d.pop("extra", {}) or {}
+        if not isinstance(extra, dict):
+            print(f"⚠️  db_all_verified: non-dict extra for user {uid!r}, skipping merge (got {type(extra).__name__!r})")
+            extra = {}
         d.update(extra)
         for k in ("verified_at", "token_refreshed_at", "left_at"):
             if d.get(k) and hasattr(d[k], "isoformat"):
@@ -279,6 +285,9 @@ async def db_get_application(app_id: str) -> dict | None:
         return None
     d = dict(row)
     extra = d.pop("data", {}) or {}
+    if not isinstance(extra, dict):
+        print(f"⚠️  db_get_application: non-dict data for app {d.get('app_id')!r}, skipping merge (got {type(extra).__name__!r})")
+        extra = {}
     d.update(extra)
     for k in ("submitted_at", "reviewed_at"):
         if d.get(k) and hasattr(d[k], "isoformat"):
@@ -339,6 +348,9 @@ async def db_all_applications() -> dict:
         d = dict(row)
         aid = d.pop("app_id")
         extra = d.pop("data", {}) or {}
+        if not isinstance(extra, dict):
+            print(f"⚠️  db_all_applications: non-dict data for app {aid!r}, skipping merge (got {type(extra).__name__!r})")
+            extra = {}
         d.update(extra)
         for k in ("submitted_at", "reviewed_at"):
             if d.get(k) and hasattr(d[k], "isoformat"):
