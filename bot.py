@@ -4,6 +4,7 @@
 #  Join/Leave welcome channel added
 #  /smedia command added
 #  poll_applications race condition fixed
+#  PostgreSQL backend for verified_data, tickets_data, applications_data
 # ============================================================
 
 import audioop  # noqa: F401 — audioop-lts shim for Python 3.13
@@ -16,6 +17,7 @@ import asyncio
 import re
 import io
 import aiohttp
+import asyncpg
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import urllib.parse
@@ -55,6 +57,9 @@ APPLICATION_LOG_CHANNEL  = int(os.getenv("APPLICATION_LOG_CHANNEL", 0))
 # Welcome / Leave channel
 WELCOME_CHANNEL_ID       = int(os.getenv("WELCOME_CHANNEL_ID", 0))
 
+# PostgreSQL
+DATABASE_URL             = os.getenv("DATABASE_URL", "")
+
 TICKET_CATEGORIES = {
     "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",       "emoji": "🛒", "color": VIREX_COLOR},
     "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.",  "emoji": "💰", "color": 0xF0A500},
@@ -71,7 +76,297 @@ def set_logo(embed: discord.Embed):
         embed.set_thumbnail(url=VIREX_LOGO)
 
 # ============================================================
-#  STORAGE
+#  DATABASE POOL (global)
+# ============================================================
+db_pool: asyncpg.Pool = None
+
+async def init_db():
+    """Create tables if they don't exist."""
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS verified_users (
+                user_id         TEXT PRIMARY KEY,
+                username        TEXT,
+                access_token    TEXT,
+                refresh_token   TEXT,
+                verified_at     TIMESTAMPTZ,
+                token_refreshed_at TIMESTAMPTZ,
+                token_expired   BOOLEAN DEFAULT FALSE,
+                last_left_guild TEXT,
+                left_at         TIMESTAMPTZ,
+                extra           JSONB DEFAULT '{}'::jsonb
+            );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+                channel_id      TEXT PRIMARY KEY,
+                user_id         BIGINT,
+                category        TEXT,
+                created_at      TIMESTAMPTZ,
+                last_activity   TIMESTAMPTZ,
+                auto_close      BOOLEAN DEFAULT TRUE,
+                status          TEXT DEFAULT 'open'
+            );
+
+            CREATE TABLE IF NOT EXISTS applications (
+                app_id          TEXT PRIMARY KEY,
+                discord_id      TEXT,
+                discord_username TEXT,
+                submitted_at    TIMESTAMPTZ,
+                status          TEXT DEFAULT 'pending',
+                message_id      BIGINT,
+                channel_id      BIGINT,
+                interview_channel BIGINT,
+                reviewed_by     BIGINT,
+                reviewed_at     TIMESTAMPTZ,
+                deny_reason     TEXT,
+                data            JSONB DEFAULT '{}'::jsonb
+            );
+        """)
+    print("✅ PostgreSQL tables ready")
+
+# ============================================================
+#  VERIFIED USERS — DB HELPERS
+# ============================================================
+async def db_get_verified(user_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM verified_users WHERE user_id = $1", user_id)
+    if not row:
+        return None
+    d = dict(row)
+    extra = d.pop("extra", {}) or {}
+    # Merge extra fields back in
+    d.update(extra)
+    # Convert timestamps to ISO strings for compatibility
+    for k in ("verified_at", "token_refreshed_at", "left_at"):
+        if d.get(k) and hasattr(d[k], "isoformat"):
+            d[k] = d[k].isoformat()
+    return d
+
+async def db_set_verified(user_id: str, data: dict):
+    """Upsert a verified user. Known columns are stored directly; anything else goes into extra JSONB."""
+    known = {"username", "access_token", "refresh_token", "verified_at",
+             "token_refreshed_at", "token_expired", "last_left_guild", "left_at"}
+    base  = {k: v for k, v in data.items() if k in known}
+    extra = {k: v for k, v in data.items() if k not in known and k != "user_id"}
+
+    # Normalise timestamps
+    for k in ("verified_at", "token_refreshed_at", "left_at"):
+        if isinstance(base.get(k), str):
+            try:
+                base[k] = datetime.fromisoformat(base[k])
+            except Exception:
+                base[k] = None
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO verified_users
+                (user_id, username, access_token, refresh_token, verified_at,
+                 token_refreshed_at, token_expired, last_left_guild, left_at, extra)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username           = EXCLUDED.username,
+                access_token       = EXCLUDED.access_token,
+                refresh_token      = EXCLUDED.refresh_token,
+                verified_at        = COALESCE(EXCLUDED.verified_at, verified_users.verified_at),
+                token_refreshed_at = EXCLUDED.token_refreshed_at,
+                token_expired      = EXCLUDED.token_expired,
+                last_left_guild    = EXCLUDED.last_left_guild,
+                left_at            = EXCLUDED.left_at,
+                extra              = verified_users.extra || EXCLUDED.extra
+        """,
+            user_id,
+            base.get("username"),
+            base.get("access_token"),
+            base.get("refresh_token"),
+            base.get("verified_at"),
+            base.get("token_refreshed_at"),
+            base.get("token_expired", False),
+            base.get("last_left_guild"),
+            base.get("left_at"),
+            json.dumps(extra),
+        )
+
+async def db_update_verified_field(user_id: str, **kwargs):
+    """Patch individual fields on an existing row (or upsert skeleton)."""
+    existing = await db_get_verified(user_id) or {"user_id": user_id}
+    existing.update(kwargs)
+    await db_set_verified(user_id, existing)
+
+async def db_all_verified() -> dict:
+    """Return all verified users as a {user_id: info_dict} mapping."""
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM verified_users")
+    result = {}
+    for row in rows:
+        d = dict(row)
+        uid = d.pop("user_id")
+        extra = d.pop("extra", {}) or {}
+        d.update(extra)
+        for k in ("verified_at", "token_refreshed_at", "left_at"):
+            if d.get(k) and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        result[uid] = d
+    return result
+
+# ============================================================
+#  TICKETS — DB HELPERS
+# ============================================================
+async def db_get_ticket(channel_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM tickets WHERE channel_id = $1", channel_id)
+    if not row:
+        return None
+    d = dict(row)
+    for k in ("created_at", "last_activity"):
+        if d.get(k) and hasattr(d[k], "isoformat"):
+            d[k] = d[k].isoformat()
+    return d
+
+async def db_set_ticket(channel_id: str, data: dict):
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO tickets (channel_id, user_id, category, created_at, last_activity, auto_close, status)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            ON CONFLICT (channel_id) DO UPDATE SET
+                user_id       = EXCLUDED.user_id,
+                category      = EXCLUDED.category,
+                created_at    = COALESCE(EXCLUDED.created_at, tickets.created_at),
+                last_activity = EXCLUDED.last_activity,
+                auto_close    = EXCLUDED.auto_close,
+                status        = EXCLUDED.status
+        """,
+            channel_id,
+            int(data.get("user_id", 0)),
+            data.get("category"),
+            _parse_ts(data.get("created_at")),
+            _parse_ts(data.get("last_activity")),
+            data.get("auto_close", True),
+            data.get("status", "open"),
+        )
+
+async def db_update_ticket(channel_id: str, **kwargs):
+    existing = await db_get_ticket(channel_id)
+    if not existing:
+        return
+    existing.update(kwargs)
+    await db_set_ticket(channel_id, existing)
+
+async def db_all_tickets() -> dict:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM tickets")
+    result = {}
+    for row in rows:
+        d = dict(row)
+        cid = d.pop("channel_id")
+        for k in ("created_at", "last_activity"):
+            if d.get(k) and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        result[cid] = d
+    return result
+
+# ============================================================
+#  APPLICATIONS — DB HELPERS
+# ============================================================
+async def db_get_application(app_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM applications WHERE app_id = $1", app_id)
+    if not row:
+        return None
+    d = dict(row)
+    extra = d.pop("data", {}) or {}
+    d.update(extra)
+    for k in ("submitted_at", "reviewed_at"):
+        if d.get(k) and hasattr(d[k], "isoformat"):
+            d[k] = d[k].isoformat()
+    return d
+
+async def db_set_application(app_id: str, data: dict):
+    known = {"discord_id", "discord_username", "submitted_at", "status",
+             "message_id", "channel_id", "interview_channel",
+             "reviewed_by", "reviewed_at", "deny_reason"}
+    base  = {k: v for k, v in data.items() if k in known}
+    extra = {k: v for k, v in data.items() if k not in known and k != "app_id"}
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO applications
+                (app_id, discord_id, discord_username, submitted_at, status,
+                 message_id, channel_id, interview_channel,
+                 reviewed_by, reviewed_at, deny_reason, data)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            ON CONFLICT (app_id) DO UPDATE SET
+                discord_id        = EXCLUDED.discord_id,
+                discord_username  = EXCLUDED.discord_username,
+                submitted_at      = COALESCE(EXCLUDED.submitted_at, applications.submitted_at),
+                status            = EXCLUDED.status,
+                message_id        = EXCLUDED.message_id,
+                channel_id        = EXCLUDED.channel_id,
+                interview_channel = EXCLUDED.interview_channel,
+                reviewed_by       = EXCLUDED.reviewed_by,
+                reviewed_at       = EXCLUDED.reviewed_at,
+                deny_reason       = EXCLUDED.deny_reason,
+                data              = applications.data || EXCLUDED.data
+        """,
+            app_id,
+            str(base.get("discord_id", "")),
+            base.get("discord_username"),
+            _parse_ts(base.get("submitted_at")),
+            base.get("status", "pending"),
+            _to_int(base.get("message_id")),
+            _to_int(base.get("channel_id")),
+            _to_int(base.get("interview_channel")),
+            _to_int(base.get("reviewed_by")),
+            _parse_ts(base.get("reviewed_at")),
+            base.get("deny_reason"),
+            json.dumps(extra),
+        )
+
+async def db_update_application(app_id: str, **kwargs):
+    existing = await db_get_application(app_id) or {"app_id": app_id}
+    existing.update(kwargs)
+    await db_set_application(app_id, existing)
+
+async def db_all_applications() -> dict:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM applications")
+    result = {}
+    for row in rows:
+        d = dict(row)
+        aid = d.pop("app_id")
+        extra = d.pop("data", {}) or {}
+        d.update(extra)
+        for k in ("submitted_at", "reviewed_at"):
+            if d.get(k) and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        result[aid] = d
+    return result
+
+# ============================================================
+#  UTILITY
+# ============================================================
+def _parse_ts(value):
+    if not value:
+        return None
+    if hasattr(value, "isoformat"):
+        return value
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None
+
+def _to_int(value):
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+# ============================================================
+#  LEGACY JSON HELPERS (kept for migrate script / fallback)
 # ============================================================
 TICKETS_FILE      = "/app/data/tickets.json"
 VERIFIED_FILE     = "/app/data/verified.json"
@@ -82,14 +377,6 @@ def load_json(path):
         with open(path) as f:
             return json.load(f)
     return {}
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
-tickets_data      = load_json(TICKETS_FILE)
-verified_data     = load_json(VERIFIED_FILE)
-applications_data = load_json(APPLICATIONS_FILE)
 
 # ============================================================
 #  PERMISSION HELPERS
@@ -108,7 +395,7 @@ def is_admin(member: discord.Member) -> bool:
 #  TOKEN REFRESH — keeps backup tokens alive FOREVER
 # ============================================================
 async def refresh_token(uid: str) -> bool:
-    info = verified_data.get(uid)
+    info = await db_get_verified(uid)
     if not info:
         return False
     refresh_tok = info.get("refresh_token")
@@ -131,18 +418,19 @@ async def refresh_token(uid: str) -> bool:
             ) as resp:
                 if resp.status == 200:
                     token_data = await resp.json()
-                    verified_data[uid]["access_token"]       = token_data["access_token"]
-                    verified_data[uid]["refresh_token"]      = token_data["refresh_token"]
-                    verified_data[uid]["token_refreshed_at"] = datetime.now(timezone.utc).isoformat()
-                    verified_data[uid].pop("token_expired", None)
-                    save_json(VERIFIED_FILE, verified_data)
+                    await db_update_verified_field(
+                        uid,
+                        access_token=token_data["access_token"],
+                        refresh_token=token_data["refresh_token"],
+                        token_refreshed_at=datetime.now(timezone.utc).isoformat(),
+                        token_expired=False,
+                    )
                     print(f"[TOKEN REFRESH] ✅ Refreshed token for user {uid}")
                     return True
                 else:
                     text = await resp.text()
                     print(f"[TOKEN REFRESH] ❌ Failed for {uid}: {resp.status} {text}")
-                    verified_data[uid]["token_expired"] = True
-                    save_json(VERIFIED_FILE, verified_data)
+                    await db_update_verified_field(uid, token_expired=True)
                     return False
     except Exception as e:
         print(f"[TOKEN REFRESH] ❌ Exception for {uid}: {e}")
@@ -151,10 +439,10 @@ async def refresh_token(uid: str) -> bool:
 
 @tasks.loop(hours=6)
 async def token_refresh_loop():
-    now = datetime.now(timezone.utc)
-    refreshed = 0
-    failed    = 0
-    for uid, info in list(verified_data.items()):
+    now      = datetime.now(timezone.utc)
+    all_v    = await db_all_verified()
+    refreshed = failed = 0
+    for uid, info in all_v.items():
         if not info.get("refresh_token"):
             continue
         if info.get("token_expired"):
@@ -184,37 +472,12 @@ async def before_token_refresh():
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-@bot.event
-async def on_message(message):
-    # Eigene Bot-Nachrichten ignorieren
-    if message.author == bot.user:
-        return
-
-    # Prüfen ob Nachricht mit * beginnt
-    if message.content.startswith("*"):
-        # Prefix entfernen
-        text = message.content[1:]
-
-        # Originalnachricht löschen
-        await message.delete()
-
-        # Nachricht als Bot senden
-        await message.channel.send(text)
-
-    await bot.process_commands(message)
-
-
-
-
-
 # ============================================================
 #  GUILD JOIN HELPER
 # ============================================================
 async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] = None) -> dict:
     uid  = str(user_id)
-    info = verified_data.get(uid)
+    info = await db_get_verified(uid)
     if not info or not info.get("access_token"):
         return {"status": "no_token", "detail": "User has not verified yet."}
 
@@ -227,7 +490,7 @@ async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] =
             if datetime.now(timezone.utc) - last >= timedelta(days=5):
                 print(f"[RESTORE] Token for {uid} is old, refreshing before restore...")
                 await refresh_token(uid)
-                info = verified_data.get(uid, info)
+                info = await db_get_verified(uid) or info
         except Exception:
             pass
 
@@ -252,15 +515,14 @@ async def add_member_to_guild(user_id: int, guild_id: int, role_ids: list[int] =
                 print(f"[RESTORE] 401 for {uid}, attempting token refresh...")
                 refreshed = await refresh_token(uid)
                 if refreshed:
-                    new_info = verified_data.get(uid, {})
+                    new_info = await db_get_verified(uid) or {}
                     payload["access_token"] = new_info.get("access_token", "")
                     async with session.put(url, json=payload, headers=headers) as retry_resp:
                         if retry_resp.status in (200, 201):
                             return {"status": "added",   "detail": "Added after token refresh."}
                         elif retry_resp.status == 204:
                             return {"status": "already", "detail": "Already in server."}
-                verified_data[uid]["token_expired"] = True
-                save_json(VERIFIED_FILE, verified_data)
+                await db_update_verified_field(uid, token_expired=True)
                 return {"status": "token_expired", "detail": "Access token has expired. User needs to re-verify."}
             else:
                 text = await resp.text()
@@ -340,7 +602,7 @@ def generate_transcript(channel, messages, guild):
 #  CLOSE TICKET
 # ============================================================
 async def close_ticket(channel, guild, closed_by=None):
-    info = tickets_data.get(str(channel.id))
+    info = await db_get_ticket(str(channel.id))
     if not info:
         try: await channel.delete()
         except: pass
@@ -369,8 +631,7 @@ async def close_ticket(channel, guild, closed_by=None):
             )
         except Exception as e:
             print(f"Transcript send error: {e}")
-    tickets_data[str(channel.id)]["status"] = "closed"
-    save_json(TICKETS_FILE, tickets_data)
+    await db_update_ticket(str(channel.id), status="closed")
     try: await channel.delete()
     except Exception as e: print(f"Channel delete error: {e}")
 
@@ -416,13 +677,13 @@ async def notify_applicant(user_id: int, action: str, reason: str = ""):
 
 
 async def update_application_embed(app_id: str, action: str, reviewer: discord.Member, reason: str = ""):
-    app_data = applications_data.get(app_id)
+    app_data = await db_get_application(app_id)
     if not app_data:
         return
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         return
-    channel = guild.get_channel(app_data.get("channel_id", APPLICATION_CHANNEL_ID))
+    channel = guild.get_channel(app_data.get("channel_id") or APPLICATION_CHANNEL_ID)
     if not channel:
         return
     try:
@@ -468,18 +729,20 @@ class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
         self.app_id = app_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        app_data = applications_data.get(self.app_id)
+        app_data = await db_get_application(self.app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True)
             return
         reason_text = self.reason.value.strip()
-        applications_data[self.app_id].update({
-            "status": "denied", "reviewed_by": interaction.user.id,
-            "reviewed_at": datetime.now(timezone.utc).isoformat(), "deny_reason": reason_text
-        })
-        save_json(APPLICATIONS_FILE, applications_data)
+        await db_update_application(
+            self.app_id,
+            status="denied",
+            reviewed_by=interaction.user.id,
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+            deny_reason=reason_text,
+        )
         await update_application_embed(self.app_id, "denied", interaction.user, reason_text)
-        await notify_applicant(app_data["discord_id"], "denied", reason_text)
+        await notify_applicant(int(app_data["discord_id"]), "denied", reason_text)
         await interaction.response.send_message(
             embed=discord.Embed(
                 description=f"❌ Application `{self.app_id}` denied."
@@ -499,18 +762,19 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         self.app_id = app_id
 
     async def on_submit(self, interaction: discord.Interaction):
-        app_data = applications_data.get(self.app_id)
+        app_data = await db_get_application(self.app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True)
             return
         note_text = self.reason.value.strip()
-        applications_data[self.app_id].update({
-            "status": "on_hold", "reviewed_by": interaction.user.id,
-            "reviewed_at": datetime.now(timezone.utc).isoformat()
-        })
-        save_json(APPLICATIONS_FILE, applications_data)
+        await db_update_application(
+            self.app_id,
+            status="on_hold",
+            reviewed_by=interaction.user.id,
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+        )
         await update_application_embed(self.app_id, "on_hold", interaction.user, note_text)
-        await notify_applicant(app_data["discord_id"], "on_hold", note_text)
+        await notify_applicant(int(app_data["discord_id"]), "on_hold", note_text)
         await interaction.response.send_message(
             embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.",
                                 color=VIREX_COLOR_WARN), ephemeral=True)
@@ -523,8 +787,9 @@ class ApplicationReviewView(discord.ui.View):
         super().__init__(timeout=None)
         self.app_id = app_id
 
-    def _resolve_app_id(self, message_id: int) -> str:
-        for aid, adata in applications_data.items():
+    async def _resolve_app_id(self, message_id: int) -> str:
+        all_apps = await db_all_applications()
+        for aid, adata in all_apps.items():
             if adata.get("message_id") == message_id:
                 return aid
         return self.app_id
@@ -533,19 +798,20 @@ class ApplicationReviewView(discord.ui.View):
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-        app_id   = self._resolve_app_id(interaction.message.id)
-        app_data = applications_data.get(app_id)
+        app_id   = await self._resolve_app_id(interaction.message.id)
+        app_data = await db_get_application(app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
             await interaction.response.send_message("❌ Already reviewed.", ephemeral=True); return
-        applications_data[app_id].update({
-            "status": "accepted", "reviewed_by": interaction.user.id,
-            "reviewed_at": datetime.now(timezone.utc).isoformat()
-        })
-        save_json(APPLICATIONS_FILE, applications_data)
+        await db_update_application(
+            app_id,
+            status="accepted",
+            reviewed_by=interaction.user.id,
+            reviewed_at=datetime.now(timezone.utc).isoformat(),
+        )
         await update_application_embed(app_id, "accepted", interaction.user)
-        await notify_applicant(app_data["discord_id"], "accepted")
+        await notify_applicant(int(app_data["discord_id"]), "accepted")
         await interaction.response.send_message(
             embed=discord.Embed(description=f"✅ Application `{app_id}` accepted! Applicant notified.",
                                 color=VIREX_COLOR_SUCCESS), ephemeral=True)
@@ -554,8 +820,8 @@ class ApplicationReviewView(discord.ui.View):
     async def deny_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-        app_id   = self._resolve_app_id(interaction.message.id)
-        app_data = applications_data.get(app_id)
+        app_id   = await self._resolve_app_id(interaction.message.id)
+        app_data = await db_get_application(app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
@@ -566,8 +832,8 @@ class ApplicationReviewView(discord.ui.View):
     async def hold_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-        app_id   = self._resolve_app_id(interaction.message.id)
-        app_data = applications_data.get(app_id)
+        app_id   = await self._resolve_app_id(interaction.message.id)
+        app_data = await db_get_application(app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") != "pending":
@@ -578,11 +844,11 @@ class ApplicationReviewView(discord.ui.View):
     async def interview_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-        app_id   = self._resolve_app_id(interaction.message.id)
-        app_data = applications_data.get(app_id)
+        app_id   = await self._resolve_app_id(interaction.message.id)
+        app_data = await db_get_application(app_id)
         if not app_data:
             await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
-        if applications_data[app_id].get("interview_channel"):
+        if app_data.get("interview_channel"):
             await interaction.response.send_message("❌ Interview channel already exists.", ephemeral=True); return
 
         guild        = interaction.guild
@@ -624,41 +890,30 @@ class ApplicationReviewView(discord.ui.View):
             content=" ".join(filter(None, [interaction.user.mention, applicant.mention if applicant else ""])),
             embed=embed
         )
-        applications_data[app_id]["interview_channel"] = channel.id
-        save_json(APPLICATIONS_FILE, applications_data)
+        await db_update_application(app_id, interview_channel=channel.id)
         await interaction.response.send_message(
             embed=discord.Embed(description=f"✅ Interview channel created: {channel.mention}", color=VIREX_COLOR),
             ephemeral=True)
 
 # ============================================================
 #  BACKGROUND TASK — POLL FOR NEW APPLICATIONS
-#
-#  FIX: _posting_in_progress set prevents the same application
-#  from being posted twice across concurrent loop ticks.
-#  We mark it BEFORE awaiting so the next tick can't re-enter.
 # ============================================================
 _posting_in_progress: set[str] = set()
 
 @tasks.loop(seconds=10)
 async def poll_applications():
-    global applications_data
-    fresh = load_json(APPLICATIONS_FILE)
+    fresh = await db_all_applications()
     for app_id, data in fresh.items():
         if data.get("status") != "pending":
             continue
         if data.get("message_id"):
-            # Already posted — sync local cache if needed
-            if app_id not in applications_data:
-                applications_data[app_id] = data
             continue
         if app_id in _posting_in_progress:
             continue
-        # Reserve slot BEFORE any await
         _posting_in_progress.add(app_id)
-        applications_data[app_id] = data
         success = await _post_application(app_id)
         if not success:
-            _posting_in_progress.discard(app_id)  # allow retry
+            _posting_in_progress.discard(app_id)
 
 @poll_applications.before_loop
 async def before_poll():
@@ -666,7 +921,7 @@ async def before_poll():
 
 
 async def _post_application(app_id: str) -> bool:
-    app_data = applications_data.get(app_id)
+    app_data = await db_get_application(app_id)
     if not app_data:
         return False
 
@@ -710,9 +965,7 @@ async def _post_application(app_id: str) -> bool:
     view = ApplicationReviewView(app_id=app_id)
     try:
         msg = await channel.send(embed=embed, view=view)
-        applications_data[app_id]["message_id"] = msg.id
-        applications_data[app_id]["channel_id"] = channel.id
-        save_json(APPLICATIONS_FILE, applications_data)
+        await db_update_application(app_id, message_id=msg.id, channel_id=channel.id)
         print(f"[APPS] ✅ Posted application {app_id} → msg {msg.id} in #{channel.name}")
         return True
     except Exception as e:
@@ -759,13 +1012,12 @@ class TicketSelect(discord.ui.Select):
         except Exception as e:
             await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
             return
-        tickets_data[str(channel.id)] = {
+        await db_set_ticket(str(channel.id), {
             "user_id": interaction.user.id, "category": cat_key,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_activity": datetime.now(timezone.utc).isoformat(),
             "auto_close": True, "status": "open"
-        }
-        save_json(TICKETS_FILE, tickets_data)
+        })
         await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
         embed = discord.Embed(
             title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
@@ -791,7 +1043,7 @@ class TicketControlView(discord.ui.View):
 
     @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="virex_close_ticket")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        info = tickets_data.get(str(interaction.channel.id))
+        info = await db_get_ticket(str(interaction.channel.id))
         if not info:
             await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
         if not is_staff(interaction.user) and info["user_id"] != interaction.user.id:
@@ -849,21 +1101,12 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 # ============================================================
 #  BACKGROUND TASKS
 # ============================================================
-@tasks.loop(seconds=30)
-async def reload_verified_loop():
-    global verified_data
-    verified_data = load_json(VERIFIED_FILE)
-
-@reload_verified_loop.before_loop
-async def before_reload_verified():
-    await bot.wait_until_ready()
-
-
 @tasks.loop(minutes=30)
 async def auto_close_task():
-    now = datetime.now(timezone.utc)
+    now      = datetime.now(timezone.utc)
+    all_t    = await db_all_tickets()
     to_close = []
-    for cid, info in tickets_data.items():
+    for cid, info in all_t.items():
         if info.get("status") != "open": continue
         if not info.get("auto_close", True): continue
         last = datetime.fromisoformat(info["last_activity"])
@@ -892,16 +1135,17 @@ async def before_auto_close():
 @bot.event
 async def on_ready():
     print(f"✅ Virex Bot online — {bot.user}")
+    await init_db()
     await bot.change_presence(
         activity=discord.Activity(type=discord.ActivityType.watching, name="Virex 🔵")
     )
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(StoreView())
-    for app_id, data in applications_data.items():
+    all_apps = await db_all_applications()
+    for app_id, data in all_apps.items():
         if data.get("status") in ("pending", "on_hold") and data.get("message_id"):
             bot.add_view(ApplicationReviewView(app_id=app_id))
-    if not reload_verified_loop.is_running():  reload_verified_loop.start()
     if not auto_close_task.is_running():       auto_close_task.start()
     if not poll_applications.is_running():     poll_applications.start()
     if not token_refresh_loop.is_running():
@@ -919,10 +1163,20 @@ async def on_ready():
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
-    cid = str(message.channel.id)
-    if cid in tickets_data and tickets_data[cid]["status"] == "open":
-        tickets_data[cid]["last_activity"] = datetime.now(timezone.utc).isoformat()
-        save_json(TICKETS_FILE, tickets_data)
+
+    # * prefix — send as bot
+    if message.content.startswith("*"):
+        text = message.content[1:]
+        await message.delete()
+        await message.channel.send(text)
+        return
+
+    # Update ticket last_activity
+    cid  = str(message.channel.id)
+    info = await db_get_ticket(cid)
+    if info and info.get("status") == "open":
+        await db_update_ticket(cid, last_activity=datetime.now(timezone.utc).isoformat())
+
     await bot.process_commands(message)
 
 
@@ -964,11 +1218,14 @@ async def on_member_join(member: discord.Member):
 @bot.event
 async def on_member_remove(member: discord.Member):
     uid = str(member.id)
-    if uid in verified_data:
-        verified_data[uid]["last_left_guild"] = str(member.guild.id)
-        verified_data[uid]["left_at"]         = datetime.now(timezone.utc).isoformat()
-        save_json(VERIFIED_FILE, verified_data)
-        print(f"[BACKUP] 📤 {member.name} ({uid}) left {member.guild.name} — token saved")
+    info = await db_get_verified(uid)
+    if info:
+        await db_update_verified_field(
+            uid,
+            last_left_guild=str(member.guild.id),
+            left_at=datetime.now(timezone.utc).isoformat(),
+        )
+        print(f"[BACKUP] 📤 {member.name} ({uid}) left {member.guild.name} — token saved in DB")
     if not WELCOME_CHANNEL_ID:
         return
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID)
@@ -999,7 +1256,6 @@ async def on_member_remove(member: discord.Member):
 # ============================================================
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    # Only handle component interactions not already handled by the tree
     if interaction.type != discord.InteractionType.component:
         return
     if interaction.data.get("custom_id") != "virex_media_ticket":
@@ -1033,13 +1289,12 @@ async def on_interaction(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
         return
 
-    tickets_data[str(ch.id)] = {
+    await db_set_ticket(str(ch.id), {
         "user_id": interaction.user.id, "category": "support",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "last_activity": datetime.now(timezone.utc).isoformat(),
         "auto_close": True, "status": "open"
-    }
-    save_json(TICKETS_FILE, tickets_data)
+    })
     await interaction.response.send_message(f"✅ Ticket created: {ch.mention}", ephemeral=True)
 
     embed = discord.Embed(
@@ -1111,7 +1366,8 @@ async def cmd_store(interaction: discord.Interaction):
 async def cmd_close(interaction: discord.Interaction):
     if not is_staff(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-    if str(interaction.channel.id) not in tickets_data:
+    info = await db_get_ticket(str(interaction.channel.id))
+    if not info:
         await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True); return
     await interaction.response.send_message("🔒 Closing in 5 seconds...")
     await asyncio.sleep(5)
@@ -1124,7 +1380,8 @@ async def cmd_close(interaction: discord.Interaction):
 async def cmd_add(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-    if str(interaction.channel.id) not in tickets_data:
+    info = await db_get_ticket(str(interaction.channel.id))
+    if not info:
         await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
     await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
     await interaction.response.send_message(
@@ -1137,7 +1394,8 @@ async def cmd_add(interaction: discord.Interaction, user: discord.Member):
 async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
     if not is_staff(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-    if str(interaction.channel.id) not in tickets_data:
+    info = await db_get_ticket(str(interaction.channel.id))
+    if not info:
         await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(
@@ -1150,16 +1408,16 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
 async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
     if not is_staff(interaction.user):
         await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
-    if str(interaction.channel.id) not in tickets_data:
+    info = await db_get_ticket(str(interaction.channel.id))
+    if not info:
         await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True); return
-    tickets_data[str(interaction.channel.id)]["auto_close"] = enabled
-    save_json(TICKETS_FILE, tickets_data)
+    await db_update_ticket(str(interaction.channel.id), auto_close=enabled)
     status = "✅ enabled" if enabled else "❌ disabled"
     await interaction.response.send_message(
         embed=discord.Embed(description=f"Auto-close is now **{status}** for this ticket.", color=VIREX_COLOR))
 
 # ============================================================
-#  SLASH — SMEDIA  (Media Creator Announcement)
+#  SLASH — SMEDIA
 # ============================================================
 @bot.tree.command(name="smedia", description="Send a Looking for Media Creators announcement (Admin only)")
 @app_commands.describe(
@@ -1200,7 +1458,6 @@ async def cmd_smedia(
     set_logo(embed)
     embed.set_footer(text="Virex • Media Creator Program 🎬")
 
-    # Button that opens a ticket directly
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(
         label="Apply — Open a Ticket",
@@ -1291,16 +1548,17 @@ async def cmd_applypanel(interaction: discord.Interaction):
 async def cmd_app_list(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
-    if not applications_data:
+    all_apps = await db_all_applications()
+    if not all_apps:
         await interaction.response.send_message("📭 No applications found.", ephemeral=True); return
     status_icons = {"pending": "⏳", "accepted": "✅", "denied": "❌", "on_hold": "⏸️"}
     lines = []
-    for app_id, data in sorted(applications_data.items(),
+    for app_id, data in sorted(all_apps.items(),
                                 key=lambda x: x[1].get("submitted_at", ""), reverse=True):
         icon  = status_icons.get(data.get("status", "pending"), "❓")
         uname = data.get("discord_username", "Unknown")
         uid   = data.get("discord_id", "?")
-        date  = data.get("submitted_at", "")[:10]
+        date  = str(data.get("submitted_at", ""))[:10]
         lines.append(f"{icon} `{app_id}` — **{uname}** (`{uid}`) — {date}")
     chunks, chunk, length = [], [], 0
     for line in lines:
@@ -1315,7 +1573,7 @@ async def cmd_app_list(interaction: discord.Interaction):
             description="\n".join(ch), color=VIREX_COLOR
         )
         if i == 0:
-            embed.set_footer(text=f"Total: {len(applications_data)} applications")
+            embed.set_footer(text=f"Total: {len(all_apps)} applications")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1326,11 +1584,12 @@ async def cmd_app_list(interaction: discord.Interaction):
 async def cmd_app_stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
-    total    = len(applications_data)
-    pending  = sum(1 for v in applications_data.values() if v.get("status") == "pending")
-    accepted = sum(1 for v in applications_data.values() if v.get("status") == "accepted")
-    denied   = sum(1 for v in applications_data.values() if v.get("status") == "denied")
-    on_hold  = sum(1 for v in applications_data.values() if v.get("status") == "on_hold")
+    all_apps = await db_all_applications()
+    total    = len(all_apps)
+    pending  = sum(1 for v in all_apps.values() if v.get("status") == "pending")
+    accepted = sum(1 for v in all_apps.values() if v.get("status") == "accepted")
+    denied   = sum(1 for v in all_apps.values() if v.get("status") == "denied")
+    on_hold  = sum(1 for v in all_apps.values() if v.get("status") == "on_hold")
     embed = discord.Embed(
         title="📊 Application Statistics",
         description=(f"📋 **Total Applications:** `{total}`\n"
@@ -1373,12 +1632,13 @@ async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
 async def cmd_backup_restore_all(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
-    if not verified_data:
+    all_v = await db_all_verified()
+    if not all_v:
         await interaction.response.send_message("📭 No verified users in backup.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
     added, already, failed, expired = [], [], [], []
-    total = len(verified_data)
-    for uid, info in verified_data.items():
+    total = len(all_v)
+    for uid, info in all_v.items():
         result = await add_member_to_guild(int(uid), interaction.guild.id)
         name   = info.get("username", uid)
         if result["status"] == "added":           added.append(name)
@@ -1412,13 +1672,14 @@ async def cmd_backup_restore_all(interaction: discord.Interaction):
 async def cmd_backup_list(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
-    if not verified_data:
+    all_v = await db_all_verified()
+    if not all_v:
         await interaction.response.send_message("📭 Backup is empty.", ephemeral=True); return
     lines = []
-    for uid, info in verified_data.items():
+    for uid, info in all_v.items():
         name        = info.get("username", "unknown")
-        date        = info.get("verified_at", "")[:10]
-        refreshed = (info.get("token_refreshed_at") or "")[:10]
+        date        = str(info.get("verified_at", ""))[:10]
+        refreshed   = str(info.get("token_refreshed_at") or "")[:10]
         refresh_str = f" 🔄 refreshed {refreshed}" if refreshed else ""
         expired     = " ⚠️ token expired" if info.get("token_expired") else ""
         left        = " 📤 left server"    if info.get("left_at")       else ""
@@ -1436,7 +1697,7 @@ async def cmd_backup_list(interaction: discord.Interaction):
             description="\n".join(ch), color=VIREX_COLOR
         )
         if i == 0:
-            embed.set_footer(text=f"Total: {len(verified_data)} users in backup")
+            embed.set_footer(text=f"Total: {len(all_v)} users in backup")
             await interaction.response.send_message(embed=embed, ephemeral=True)
         else:
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -1447,10 +1708,11 @@ async def cmd_backup_list(interaction: discord.Interaction):
 async def cmd_backup_stats(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
-    total     = len(verified_data)
-    expired   = sum(1 for v in verified_data.values() if v.get("token_expired"))
-    left      = sum(1 for v in verified_data.values() if v.get("left_at"))
-    refreshed = sum(1 for v in verified_data.values() if v.get("token_refreshed_at"))
+    all_v     = await db_all_verified()
+    total     = len(all_v)
+    expired   = sum(1 for v in all_v.values() if v.get("token_expired"))
+    left      = sum(1 for v in all_v.values() if v.get("left_at"))
+    refreshed = sum(1 for v in all_v.values() if v.get("token_refreshed_at"))
     active    = total - expired
     embed = discord.Embed(
         title="📊 Backup Statistics",
@@ -1473,9 +1735,10 @@ async def cmd_token_refresh_now(interaction: discord.Interaction):
     if not is_admin(interaction.user):
         await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
     await interaction.response.defer(ephemeral=True)
-    total = len(verified_data)
+    all_v = await db_all_verified()
+    total = len(all_v)
     refreshed = failed = skipped = 0
-    for uid, info in list(verified_data.items()):
+    for uid, info in all_v.items():
         if not info.get("refresh_token"):
             skipped += 1; continue
         success = await refresh_token(uid)
@@ -1491,6 +1754,47 @@ async def cmd_token_refresh_now(interaction: discord.Interaction):
         color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text="Virex • Token Management")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+# ============================================================
+#  MIGRATE — import existing JSON data into PostgreSQL
+# ============================================================
+@bot.tree.command(name="migrate_json", description="Import existing JSON files into PostgreSQL (Admin only, run once)")
+@app_commands.guild_only()
+async def cmd_migrate_json(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        await interaction.response.send_message("❌ Admin only.", ephemeral=True); return
+    await interaction.response.defer(ephemeral=True)
+
+    v_count = t_count = a_count = 0
+
+    # verified.json
+    v_data = load_json(VERIFIED_FILE)
+    for uid, info in v_data.items():
+        await db_set_verified(uid, info)
+        v_count += 1
+
+    # tickets.json
+    t_data = load_json(TICKETS_FILE)
+    for cid, info in t_data.items():
+        await db_set_ticket(cid, info)
+        t_count += 1
+
+    # applications.json
+    a_data = load_json(APPLICATIONS_FILE)
+    for app_id, info in a_data.items():
+        await db_set_application(app_id, info)
+        a_count += 1
+
+    embed = discord.Embed(
+        title="✅ JSON → PostgreSQL Migration Complete",
+        description=(f"👥 **Verified users imported:** `{v_count}`\n"
+                     f"🎫 **Tickets imported:** `{t_count}`\n"
+                     f"📋 **Applications imported:** `{a_count}`"),
+        color=VIREX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc)
+    )
+    embed.set_footer(text="Virex • Database Migration")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
