@@ -1,16 +1,19 @@
 """
 Virex Web Server — OAuth2 Verify + Staff Application Form
 PostgreSQL backend — Railway-ready
+Fully synchronized with bot.py (asyncpg, same tables/columns/JSONB layout)
 """
 
 import os
 import uuid
+import json
+import asyncio
+import asyncpg
 import requests
+import urllib.parse
 from datetime import datetime, timezone
-from flask import Flask, request, render_template_string, redirect
+from flask import Flask, request, render_template_string
 from dotenv import load_dotenv
-import psycopg2
-from psycopg2.extras import RealDictCursor
 
 load_dotenv()
 
@@ -18,15 +21,11 @@ load_dotenv()
 CLIENT_ID        = os.getenv("DISCORD_CLIENT_ID", "")
 CLIENT_SECRET    = os.getenv("DISCORD_CLIENT_SECRET", "")
 WEB_BASE_URL     = os.getenv("WEB_BASE_URL", "https://your-app.up.railway.app")
-
 GUILD_ID         = int(os.getenv("GUILD_ID", 0))
 BOT_TOKEN        = os.getenv("DISCORD_TOKEN", "")
 VERIFIED_ROLE_ID = int(os.getenv("VERIFIED_ROLE_ID", 0))
-STAFF_CHANNEL_ID = int(os.getenv("STAFF_CHANNEL_ID", 0))
 VIREX_WEBSITE    = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
-
-# Railway stellt DATABASE_URL automatisch bereit
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL     = os.getenv("DATABASE_URL", "")
 
 REDIRECT_URI    = f"{WEB_BASE_URL}/callback"
 APPLY_OAUTH_URI = f"{WEB_BASE_URL}/apply/callback"
@@ -34,50 +33,145 @@ APPLY_OAUTH_URI = f"{WEB_BASE_URL}/apply/callback"
 app = Flask(__name__)
 
 
-# ── DATABASE ─────────────────────────────────────────────────
+# ── ASYNC → SYNC BRIDGE ──────────────────────────────────────
+# asyncpg is async; Flask is sync.
+# Each request gets its own short-lived event loop.
 
-def get_conn():
-    """Neue Datenbankverbindung holen."""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+def run_async(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
-def init_db():
-    """Tabellen anlegen falls nicht vorhanden."""
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS verified_users (
-                    discord_id        TEXT PRIMARY KEY,
-                    username          TEXT NOT NULL,
-                    access_token      TEXT,
-                    refresh_token     TEXT,
-                    verified_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    token_refreshed_at TIMESTAMPTZ,
-                    token_expired     BOOLEAN NOT NULL DEFAULT FALSE
-                );
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS applications (
-                    app_id            TEXT PRIMARY KEY,
-                    discord_id        BIGINT NOT NULL,
-                    discord_username  TEXT NOT NULL,
-                    submitted_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    status            TEXT NOT NULL DEFAULT 'pending',
-                    message_id        TEXT,
-                    channel_id        BIGINT,
-                    age               TEXT,
-                    timezone          TEXT,
-                    languages         TEXT,
-                    availability      TEXT,
-                    discord_since     TEXT,
-                    previous_staff    TEXT,
-                    why_valora        TEXT,
-                    skills            TEXT,
-                    extra             TEXT
-                );
-            """)
-        conn.commit()
-    print("✅ Database tables ready")
+# ── DB HELPERS (mirror bot.py schema exactly) ────────────────
+
+async def _connect():
+    return await asyncpg.connect(DATABASE_URL)
+
+
+async def _init_db():
+    conn = await _connect()
+    try:
+        # Same CREATE TABLE statements as bot.py's init_db()
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS verified_users (
+                user_id             TEXT PRIMARY KEY,
+                username            TEXT,
+                access_token        TEXT,
+                refresh_token       TEXT,
+                verified_at         TIMESTAMPTZ,
+                token_refreshed_at  TIMESTAMPTZ,
+                token_expired       BOOLEAN DEFAULT FALSE,
+                last_left_guild     TEXT,
+                left_at             TIMESTAMPTZ,
+                extra               JSONB DEFAULT '{}'::jsonb
+            );
+
+            CREATE TABLE IF NOT EXISTS tickets (
+                channel_id    TEXT PRIMARY KEY,
+                user_id       BIGINT,
+                category      TEXT,
+                created_at    TIMESTAMPTZ,
+                last_activity TIMESTAMPTZ,
+                auto_close    BOOLEAN DEFAULT TRUE,
+                status        TEXT DEFAULT 'open'
+            );
+
+            CREATE TABLE IF NOT EXISTS applications (
+                app_id            TEXT PRIMARY KEY,
+                discord_id        TEXT,
+                discord_username  TEXT,
+                submitted_at      TIMESTAMPTZ,
+                status            TEXT DEFAULT 'pending',
+                message_id        BIGINT,
+                channel_id        BIGINT,
+                interview_channel BIGINT,
+                reviewed_by       BIGINT,
+                reviewed_at       TIMESTAMPTZ,
+                deny_reason       TEXT,
+                data              JSONB DEFAULT '{}'::jsonb
+            );
+        """)
+        print("✅ DB tables ready")
+    finally:
+        await conn.close()
+
+
+async def _upsert_verified(user_id: str, username: str,
+                            access_token: str, refresh_token: str):
+    """
+    Mirrors bot.py db_set_verified().
+    Only sets the columns the web server knows about; bot.py owns the rest.
+    """
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            INSERT INTO verified_users
+                (user_id, username, access_token, refresh_token,
+                 verified_at, token_expired)
+            VALUES ($1, $2, $3, $4, NOW(), FALSE)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username      = EXCLUDED.username,
+                access_token  = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                verified_at   = EXCLUDED.verified_at,
+                token_expired = FALSE
+        """, user_id, username, access_token, refresh_token)
+    finally:
+        await conn.close()
+
+
+async def _has_pending_application(discord_id: str) -> bool:
+    """Check for an existing pending application (same logic as bot.py apply_callback)."""
+    conn = await _connect()
+    try:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM applications WHERE discord_id = $1 AND status = 'pending'",
+            discord_id
+        )
+        return row is not None
+    finally:
+        await conn.close()
+
+
+async def _insert_application(app_id: str, discord_id: str, discord_username: str,
+                               age: str, tz: str, languages: str, availability: str,
+                               discord_since: str, previous_staff: str,
+                               why_valora: str, skills: str, extra_text: str):
+    """
+    Insert a new application.
+
+    Form fields are stored in the JSONB `data` column exactly as
+    bot.py's db_get_application() expects them:
+      data -> age, timezone, languages, availability, discord_since,
+              previous_staff, why_valora, skills, extra
+    """
+    data_json = json.dumps({
+        "age":            age,
+        "timezone":       tz,
+        "languages":      languages,
+        "availability":   availability,
+        "discord_since":  discord_since,
+        "previous_staff": previous_staff,
+        "why_valora":     why_valora,
+        "skills":         skills,
+        "extra":          extra_text,
+    })
+    conn = await _connect()
+    try:
+        await conn.execute("""
+            INSERT INTO applications
+                (app_id, discord_id, discord_username, submitted_at, status, data)
+            VALUES ($1, $2, $3, NOW(), 'pending', $4::jsonb)
+        """, app_id, discord_id, discord_username, data_json)
+    finally:
+        await conn.close()
+
+
+# Initialise tables once at startup
+run_async(_init_db())
 
 
 # ── DISCORD HELPERS ──────────────────────────────────────────
@@ -86,58 +180,13 @@ def give_role(user_id: str):
     if not BOT_TOKEN or VERIFIED_ROLE_ID == 0:
         print("⚠️ Missing BOT_TOKEN or VERIFIED_ROLE_ID")
         return
-    url = f"https://discord.com/api/v10/guilds/{GUILD_ID}/members/{user_id}/roles/{VERIFIED_ROLE_ID}"
+    url = (f"https://discord.com/api/v10/guilds/{GUILD_ID}"
+           f"/members/{user_id}/roles/{VERIFIED_ROLE_ID}")
     res = requests.put(url, headers={"Authorization": f"Bot {BOT_TOKEN}"})
     if res.status_code == 204:
         print(f"✅ Role given to {user_id}")
     else:
         print(f"❌ Role error {res.status_code}: {res.text}")
-
-
-def send_application_to_discord(
-    discord_id, username, age, tz, languages, availability,
-    discord_since, previous_staff, why_valora, skills, extra, app_id
-) -> str | None:
-    if not BOT_TOKEN or STAFF_CHANNEL_ID == 0:
-        print("⚠️ Missing BOT_TOKEN or STAFF_CHANNEL_ID — skipping Discord notification")
-        return None
-
-    def field(name, value, inline=False):
-        return {"name": name, "value": str(value) or "—", "inline": inline}
-
-    embed = {
-        "title": "📋  New Staff Application",
-        "color": 0x00E5FF,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "fields": [
-            field("Applicant",               f"<@{discord_id}> (`{username}` · `{discord_id}`)", inline=False),
-            field("Age",                     age,            inline=True),
-            field("Timezone",                tz,             inline=True),
-            field("Languages",               languages,      inline=True),
-            field("Availability",            availability,   inline=True),
-            field("Discord since",           discord_since,  inline=True),
-            field("Previous staff experience", previous_staff or "—", inline=False),
-            field("Why Virex?",              why_valora,     inline=False),
-            field("Skills",                  skills,         inline=False),
-        ],
-        "footer": {"text": f"Application ID: {app_id}"},
-    }
-    if extra:
-        embed["fields"].append(field("Additional info", extra, inline=False))
-
-    url = f"https://discord.com/api/v10/channels/{STAFF_CHANNEL_ID}/messages"
-    res = requests.post(
-        url,
-        json={"embeds": [embed]},
-        headers={"Authorization": f"Bot {BOT_TOKEN}", "Content-Type": "application/json"},
-    )
-    if res.status_code == 200:
-        message_id = res.json().get("id")
-        print(f"✅ Application {app_id} posted (msg {message_id})")
-        return message_id
-    else:
-        print(f"❌ Failed to post application {app_id}: {res.status_code} {res.text}")
-        return None
 
 
 def exchange_code(code: str, redirect_uri: str) -> dict | None:
@@ -166,188 +215,70 @@ def get_discord_user(access_token: str) -> dict | None:
     return res.json() if res.status_code == 200 else None
 
 
+# ── NOTE ON APPLICATION POSTING ──────────────────────────────
+# The web server only writes the DB row (status='pending', message_id=NULL).
+# bot.py's poll_applications task runs every 10 s, detects rows without a
+# message_id, calls _post_application() and sets message_id + channel_id.
+# No Discord API call needed here — keeps concerns cleanly separated.
+
+
 # ── SHARED CSS ───────────────────────────────────────────────
 BASE_STYLE = """
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-:root {
-  --bg:      #050810;
-  --card:    #080c18;
-  --card2:   #0c1020;
-  --border:  #131828;
-  --border2: #1a2040;
-  --blue:    #00E5FF;
-  --blue2:   #0099bb;
-  --green:   #00ff99;
-  --red:     #ff3c3c;
-  --gold:    #FFD700;
-  --text:    #d8e2ff;
-  --muted:   #556080;
-  --input:   #080c18;
-}
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html { scroll-behavior: smooth; }
-body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: 'Barlow', sans-serif;
-  font-size: 15px;
-  line-height: 1.6;
-  min-height: 100vh;
-}
-a { color: var(--blue); text-decoration: none; }
-a:hover { text-decoration: underline; }
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(0,229,255,0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0,229,255,0.025) 1px, transparent 1px);
-  background-size: 40px 40px;
-  pointer-events: none;
-  z-index: 0;
-}
-body::after {
-  content: '';
-  position: fixed;
-  top: -300px; left: 50%;
-  transform: translateX(-50%);
-  width: 800px; height: 500px;
-  background: radial-gradient(ellipse, rgba(0,229,255,0.06) 0%, transparent 65%);
-  pointer-events: none;
-  z-index: 0;
-}
-.page-wrap {
-  position: relative;
-  z-index: 1;
-  max-width: 660px;
-  margin: 0 auto;
-  padding: 48px 20px 80px;
-}
-.site-header { text-align: center; margin-bottom: 44px; }
-.logo-wrap { display: inline-block; position: relative; margin-bottom: 16px; }
-.logo-wrap img {
-  width: 80px; height: 80px;
-  border-radius: 50%;
-  border: 2px solid rgba(0,229,255,0.4);
-  display: block;
-}
-.logo-glow {
-  position: absolute; inset: -8px; border-radius: 50%;
-  background: radial-gradient(circle, rgba(0,229,255,0.15), transparent 70%);
-  pointer-events: none;
-}
-.site-header h1 {
-  font-family: 'Bebas Neue', sans-serif;
-  font-size: 42px;
-  color: var(--blue);
-  letter-spacing: 6px;
-  text-transform: uppercase;
-  line-height: 1;
-}
-.site-header .sub {
-  color: var(--muted); font-size: 12px;
-  letter-spacing: 3px; text-transform: uppercase; margin-top: 6px;
-}
-.card {
-  background: linear-gradient(160deg, var(--card) 0%, var(--card2) 100%);
-  border: 1px solid var(--border);
-  border-radius: 16px;
-  padding: 36px 40px;
-  box-shadow:
-    0 0 0 1px rgba(0,229,255,0.05),
-    0 20px 60px rgba(0,0,0,0.5),
-    inset 0 1px 0 rgba(255,255,255,0.03);
-  animation: fadeUp 0.45s cubic-bezier(0.22,1,0.36,1) both;
-}
-@keyframes fadeUp {
-  from { transform: translateY(20px); opacity: 0; }
-  to   { transform: translateY(0);    opacity: 1; }
-}
-.form-section { margin-bottom: 28px; }
-.section-title {
-  font-family: 'Bebas Neue', sans-serif;
-  font-size: 14px; color: var(--blue);
-  letter-spacing: 3px; text-transform: uppercase;
-  margin-bottom: 16px; padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.form-row { display: grid; gap: 14px; margin-bottom: 14px; }
-.form-row.cols-2 { grid-template-columns: 1fr 1fr; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
-label { font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
-label .req { color: var(--blue); margin-left: 2px; }
-input[type="text"], input[type="number"], select, textarea {
-  background: rgba(0,0,0,0.3);
-  border: 1px solid var(--border2);
-  border-radius: 8px;
-  padding: 11px 14px;
-  color: var(--text);
-  font-family: 'Barlow', sans-serif;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  width: 100%;
-}
-input:focus, select:focus, textarea:focus {
-  border-color: rgba(0,229,255,0.5);
-  box-shadow: 0 0 0 3px rgba(0,229,255,0.08);
-}
-select option { background: #080c18; }
-textarea { resize: vertical; min-height: 90px; }
-.char-wrap { position: relative; }
-.char-counter {
-  position: absolute; bottom: 10px; right: 12px;
-  font-size: 11px; color: var(--muted); pointer-events: none;
-}
-.btn-submit {
-  width: 100%; padding: 14px;
-  background: linear-gradient(135deg, var(--blue) 0%, var(--blue2) 100%);
-  color: #000; border: none; border-radius: 10px;
-  font-family: 'Bebas Neue', sans-serif;
-  font-size: 20px; letter-spacing: 3px; cursor: pointer;
-  transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s;
-  margin-top: 8px;
-  box-shadow: 0 4px 20px rgba(0,229,255,0.2);
-}
-.btn-submit:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 6px 28px rgba(0,229,255,0.3); }
-.btn-submit:active { transform: translateY(0); }
-.btn-submit:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-.divider { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
-.discord-tag {
-  display: inline-flex; align-items: center; gap: 8px;
-  background: rgba(88,101,242,0.1); border: 1px solid rgba(88,101,242,0.2);
-  border-radius: 8px; padding: 8px 14px;
-  font-size: 14px; font-weight: 600; color: #8fa8ff; margin-bottom: 20px;
-}
-.discord-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--green); box-shadow: 0 0 8px var(--green); flex-shrink: 0;
-}
-.status-card { text-align: center; padding: 16px 0 10px; }
-.status-icon { font-size: 54px; display: block; margin-bottom: 14px; }
-.status-card h2 { font-family: 'Bebas Neue', sans-serif; font-size: 32px; letter-spacing: 3px; }
-.status-card h2.success { color: var(--green); }
-.status-card h2.error   { color: var(--red); }
-.status-card h2.warning { color: var(--gold); }
-.status-card p { color: var(--muted); margin-top: 10px; font-size: 14px; }
-.highlight-box {
-  background: rgba(0,229,255,0.05); border: 1px solid rgba(0,229,255,0.15);
-  border-radius: 8px; padding: 12px 18px; margin: 18px 0 0;
-  font-size: 14px; color: var(--blue); text-align: center;
-}
-.footer { text-align: center; margin-top: 30px; color: var(--muted); font-size: 12px; letter-spacing: 1px; }
-@media (max-width: 520px) {
-  .card { padding: 24px 20px; }
-  .form-row.cols-2 { grid-template-columns: 1fr; }
-  .site-header h1 { font-size: 32px; }
-}
+:root{--bg:#050810;--card:#080c18;--card2:#0c1020;--border:#131828;--border2:#1a2040;--blue:#00E5FF;--blue2:#0099bb;--green:#00ff99;--red:#ff3c3c;--gold:#FFD700;--text:#d8e2ff;--muted:#556080}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'Barlow',sans-serif;font-size:15px;line-height:1.6;min-height:100vh}
+a{color:var(--blue);text-decoration:none}a:hover{text-decoration:underline}
+body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(rgba(0,229,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(0,229,255,.025) 1px,transparent 1px);background-size:40px 40px;pointer-events:none;z-index:0}
+body::after{content:'';position:fixed;top:-300px;left:50%;transform:translateX(-50%);width:800px;height:500px;background:radial-gradient(ellipse,rgba(0,229,255,.06) 0%,transparent 65%);pointer-events:none;z-index:0}
+.page-wrap{position:relative;z-index:1;max-width:660px;margin:0 auto;padding:48px 20px 80px}
+.site-header{text-align:center;margin-bottom:44px}
+.logo-wrap{display:inline-block;position:relative;margin-bottom:16px}
+.logo-wrap img{width:80px;height:80px;border-radius:50%;border:2px solid rgba(0,229,255,.4);display:block}
+.logo-glow{position:absolute;inset:-8px;border-radius:50%;background:radial-gradient(circle,rgba(0,229,255,.15),transparent 70%);pointer-events:none}
+.site-header h1{font-family:'Bebas Neue',sans-serif;font-size:42px;color:var(--blue);letter-spacing:6px;text-transform:uppercase;line-height:1}
+.site-header .sub{color:var(--muted);font-size:12px;letter-spacing:3px;text-transform:uppercase;margin-top:6px}
+.card{background:linear-gradient(160deg,var(--card) 0%,var(--card2) 100%);border:1px solid var(--border);border-radius:16px;padding:36px 40px;box-shadow:0 0 0 1px rgba(0,229,255,.05),0 20px 60px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.03);animation:fadeUp .45s cubic-bezier(.22,1,.36,1) both}
+@keyframes fadeUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.form-section{margin-bottom:28px}
+.section-title{font-family:'Bebas Neue',sans-serif;font-size:14px;color:var(--blue);letter-spacing:3px;text-transform:uppercase;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.form-row{display:grid;gap:14px;margin-bottom:14px}
+.form-row.cols-2{grid-template-columns:1fr 1fr}
+.form-group{display:flex;flex-direction:column;gap:6px}
+label{font-size:12px;font-weight:600;color:var(--muted);letter-spacing:1px;text-transform:uppercase}
+label .req{color:var(--blue);margin-left:2px}
+input[type="text"],input[type="number"],select,textarea{background:rgba(0,0,0,.3);border:1px solid var(--border2);border-radius:8px;padding:11px 14px;color:var(--text);font-family:'Barlow',sans-serif;font-size:14px;outline:none;transition:border-color .2s,box-shadow .2s;width:100%}
+input:focus,select:focus,textarea:focus{border-color:rgba(0,229,255,.5);box-shadow:0 0 0 3px rgba(0,229,255,.08)}
+select option{background:#080c18}
+textarea{resize:vertical;min-height:90px}
+.char-wrap{position:relative}
+.char-counter{position:absolute;bottom:10px;right:12px;font-size:11px;color:var(--muted);pointer-events:none}
+.btn-submit{width:100%;padding:14px;background:linear-gradient(135deg,var(--blue) 0%,var(--blue2) 100%);color:#000;border:none;border-radius:10px;font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;cursor:pointer;transition:opacity .2s,transform .15s,box-shadow .2s;margin-top:8px;box-shadow:0 4px 20px rgba(0,229,255,.2)}
+.btn-submit:hover{opacity:.9;transform:translateY(-1px);box-shadow:0 6px 28px rgba(0,229,255,.3)}
+.btn-submit:active{transform:translateY(0)}
+.btn-submit:disabled{opacity:.4;cursor:not-allowed;transform:none}
+.divider{border:none;border-top:1px solid var(--border);margin:28px 0}
+.discord-tag{display:inline-flex;align-items:center;gap:8px;background:rgba(88,101,242,.1);border:1px solid rgba(88,101,242,.2);border-radius:8px;padding:8px 14px;font-size:14px;font-weight:600;color:#8fa8ff;margin-bottom:20px}
+.discord-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green);flex-shrink:0}
+.status-card{text-align:center;padding:16px 0 10px}
+.status-icon{font-size:54px;display:block;margin-bottom:14px}
+.status-card h2{font-family:'Bebas Neue',sans-serif;font-size:32px;letter-spacing:3px}
+.status-card h2.success{color:var(--green)}.status-card h2.error{color:var(--red)}.status-card h2.warning{color:var(--gold)}
+.status-card p{color:var(--muted);margin-top:10px;font-size:14px}
+.highlight-box{background:rgba(0,229,255,.05);border:1px solid rgba(0,229,255,.15);border-radius:8px;padding:12px 18px;margin:18px 0 0;font-size:14px;color:var(--blue);text-align:center}
+.footer{text-align:center;margin-top:30px;color:var(--muted);font-size:12px;letter-spacing:1px}
+@media(max-width:520px){.card{padding:24px 20px}.form-row.cols-2{grid-template-columns:1fr}.site-header h1{font-size:32px}}
 </style>
 """
 
-LOGO_HTML = '<div class="logo-wrap"><div class="logo-glow"></div><img src="/static/logo.png" alt="Virex" onerror="this.parentElement.innerHTML=\'<span style=&quot;font-size:44px&quot;>🐻</span>\'"></div>'
+LOGO_HTML = (
+    '<div class="logo-wrap"><div class="logo-glow"></div>'
+    '<img src="/static/logo.png" alt="Virex" '
+    "onerror=\"this.parentElement.innerHTML='<span style=&quot;font-size:44px&quot;>🐻</span>'\"></div>"
+)
 
 # ── TEMPLATES ────────────────────────────────────────────────
 
@@ -371,7 +302,10 @@ SUCCESS_HTML = BASE_STYLE + """
 
 ERROR_HTML = BASE_STYLE + """
 <div class="page-wrap">
-  <header class="site-header"><div class="logo-emoji" style="display:inline-flex;align-items:center;justify-content:center;width:80px;height:80px;border-radius:50%;border:2px solid rgba(0,229,255,0.3);background:rgba(0,229,255,0.05);font-size:36px;margin-bottom:16px">🐻</div><h1>VIREX</h1></header>
+  <header class="site-header">
+    <div style="display:inline-flex;align-items:center;justify-content:center;width:80px;height:80px;border-radius:50%;border:2px solid rgba(0,229,255,.3);background:rgba(0,229,255,.05);font-size:36px;margin-bottom:16px">🐻</div>
+    <h1>VIREX</h1>
+  </header>
   <div class="card">
     <div class="status-card">
       <span class="status-icon">❌</span>
@@ -393,7 +327,7 @@ APPLY_OAUTH_HTML = BASE_STYLE + """
       <p style="margin-top:12px">We need to verify your Discord account<br>before you can submit an application.</p>
     </div>
     <div style="margin-top:28px;text-align:center">
-      <a href="{{ oauth_url }}" style="display:inline-block;padding:14px 36px;background:#5865F2;color:white;border-radius:10px;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px;text-decoration:none;box-shadow:0 4px 20px rgba(88,101,242,0.3);transition:opacity 0.2s" onmouseover="this.style.opacity=0.85" onmouseout="this.style.opacity=1">
+      <a href="{{ oauth_url }}" style="display:inline-block;padding:14px 36px;background:#5865F2;color:white;border-radius:10px;font-family:'Bebas Neue',sans-serif;font-size:18px;letter-spacing:2px;text-decoration:none;box-shadow:0 4px 20px rgba(88,101,242,.3)" onmouseover="this.style.opacity=0.85" onmouseout="this.style.opacity=1">
         🔐 &nbsp; CONTINUE WITH DISCORD
       </a>
     </div>
@@ -430,15 +364,22 @@ APPLY_FORM_HTML = BASE_STYLE + """
             </select>
           </div>
         </div>
-        <div class="form-row"><div class="form-group"><label>How long have you had Discord? <span class="req">*</span></label><input type="text" name="discord_since" required placeholder="e.g. 3 years, since 2020"></div></div>
+        <div class="form-row"><div class="form-group">
+          <label>How long have you had Discord? <span class="req">*</span></label>
+          <input type="text" name="discord_since" required placeholder="e.g. 3 years, since 2020">
+        </div></div>
       </div>
 
       <hr class="divider">
 
       <div class="form-section">
         <div class="section-title">Experience</div>
-        <div class="form-row"><div class="form-group"><label>Previous staff / moderation experience <span class="req">*</span></label>
-          <div class="char-wrap"><textarea name="previous_staff" id="prev_staff" required placeholder="Describe any previous staff roles. If none, write 'No experience'." maxlength="600" rows="4"></textarea><span class="char-counter" id="cnt_prev">0 / 600</span></div>
+        <div class="form-row"><div class="form-group">
+          <label>Previous staff / moderation experience <span class="req">*</span></label>
+          <div class="char-wrap">
+            <textarea name="previous_staff" id="prev_staff" required placeholder="Describe any previous staff roles. If none, write 'No experience'." maxlength="600" rows="4"></textarea>
+            <span class="char-counter" id="cnt_prev">0 / 600</span>
+          </div>
         </div></div>
       </div>
 
@@ -446,11 +387,19 @@ APPLY_FORM_HTML = BASE_STYLE + """
 
       <div class="form-section">
         <div class="section-title">Motivation</div>
-        <div class="form-row"><div class="form-group"><label>Why do you want to join the Virex staff team? <span class="req">*</span></label>
-          <div class="char-wrap"><textarea name="why_valora" id="why_valora" required placeholder="Tell us why you want to be part of Virex and what you can contribute." maxlength="800" rows="5"></textarea><span class="char-counter" id="cnt_why">0 / 800</span></div>
+        <div class="form-row"><div class="form-group">
+          <label>Why do you want to join the Virex staff team? <span class="req">*</span></label>
+          <div class="char-wrap">
+            <textarea name="why_valora" id="why_valora" required placeholder="Tell us why you want to be part of Virex and what you can contribute." maxlength="800" rows="5"></textarea>
+            <span class="char-counter" id="cnt_why">0 / 800</span>
+          </div>
         </div></div>
-        <div class="form-row"><div class="form-group"><label>Your skills & strengths <span class="req">*</span></label>
-          <div class="char-wrap"><textarea name="skills" id="skills" required placeholder="e.g. problem solving, fast response, coding, multilingual..." maxlength="600" rows="4"></textarea><span class="char-counter" id="cnt_skills">0 / 600</span></div>
+        <div class="form-row"><div class="form-group">
+          <label>Your skills &amp; strengths <span class="req">*</span></label>
+          <div class="char-wrap">
+            <textarea name="skills" id="skills" required placeholder="e.g. problem solving, fast response, coding, multilingual..." maxlength="600" rows="4"></textarea>
+            <span class="char-counter" id="cnt_skills">0 / 600</span>
+          </div>
         </div></div>
       </div>
 
@@ -458,8 +407,12 @@ APPLY_FORM_HTML = BASE_STYLE + """
 
       <div class="form-section">
         <div class="section-title">Anything else?</div>
-        <div class="form-row"><div class="form-group"><label>Additional information (optional)</label>
-          <div class="char-wrap"><textarea name="extra" id="extra" placeholder="Anything else you'd like us to know?" maxlength="400" rows="3"></textarea><span class="char-counter" id="cnt_extra">0 / 400</span></div>
+        <div class="form-row"><div class="form-group">
+          <label>Additional information (optional)</label>
+          <div class="char-wrap">
+            <textarea name="extra" id="extra" placeholder="Anything else you'd like us to know?" maxlength="400" rows="3"></textarea>
+            <span class="char-counter" id="cnt_extra">0 / 400</span>
+          </div>
         </div></div>
       </div>
 
@@ -520,9 +473,10 @@ APPLY_ALREADY_HTML = BASE_STYLE + """
 
 @app.route("/")
 def home():
-    return """<div style="text-align:center;color:#00E5FF;font-family:'Bebas Neue',sans-serif;
-    letter-spacing:4px;font-size:32px;margin-top:100px">VIREX ✅<br>
-    <span style="font-size:14px;color:#556080;font-family:sans-serif;letter-spacing:1px">OAuth Server Running</span></div>"""
+    return ('<div style="text-align:center;color:#00E5FF;font-family:\'Bebas Neue\',sans-serif;'
+            'letter-spacing:4px;font-size:32px;margin-top:100px">VIREX ✅<br>'
+            '<span style="font-size:14px;color:#556080;font-family:sans-serif;letter-spacing:1px">'
+            'OAuth Server Running</span></div>')
 
 
 # ── VERIFY FLOW ──────────────────────────────────────────────
@@ -533,56 +487,51 @@ def callback():
     error = request.args.get("error")
 
     if error or not code:
-        return render_template_string(ERROR_HTML, error="Authorization was cancelled or failed.", website=VIREX_WEBSITE), 400
+        return render_template_string(ERROR_HTML,
+            error="Authorization was cancelled or failed.",
+            website=VIREX_WEBSITE), 400
 
     token_data = exchange_code(code, REDIRECT_URI)
     if not token_data:
-        return render_template_string(ERROR_HTML, error="Token exchange failed. Please try again.", website=VIREX_WEBSITE), 500
+        return render_template_string(ERROR_HTML,
+            error="Token exchange failed. Please try again.",
+            website=VIREX_WEBSITE), 500
 
-    access_token  = token_data.get("access_token")
-    refresh_token = token_data.get("refresh_token")
-
-    user = get_discord_user(access_token)
+    user = get_discord_user(token_data["access_token"])
     if not user:
-        return render_template_string(ERROR_HTML, error="Could not fetch Discord user.", website=VIREX_WEBSITE), 500
+        return render_template_string(ERROR_HTML,
+            error="Could not fetch Discord user.",
+            website=VIREX_WEBSITE), 500
 
     uid      = user["id"]
     username = user["username"]
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO verified_users
-                    (discord_id, username, access_token, refresh_token, verified_at, token_expired)
-                VALUES (%s, %s, %s, %s, NOW(), FALSE)
-                ON CONFLICT (discord_id) DO UPDATE SET
-                    username          = EXCLUDED.username,
-                    access_token      = EXCLUDED.access_token,
-                    refresh_token     = EXCLUDED.refresh_token,
-                    verified_at       = EXCLUDED.verified_at,
-                    token_expired     = FALSE
-            """, (uid, username, access_token, refresh_token))
-        conn.commit()
-
+    run_async(_upsert_verified(
+        uid, username,
+        token_data["access_token"],
+        token_data.get("refresh_token", ""),
+    ))
     give_role(uid)
     print(f"✅ VERIFIED: {username} ({uid})")
-    return render_template_string(SUCCESS_HTML, username=username, website=VIREX_WEBSITE)
+
+    return render_template_string(SUCCESS_HTML,
+        username=username, website=VIREX_WEBSITE)
 
 
 # ── APPLY FLOW ───────────────────────────────────────────────
 
 @app.route("/apply")
 def apply_start():
-    import urllib.parse
-    encoded_redirect = urllib.parse.quote(APPLY_OAUTH_URI, safe="")
+    encoded = urllib.parse.quote(APPLY_OAUTH_URI, safe="")
     oauth_url = (
         "https://discord.com/oauth2/authorize"
         f"?client_id={CLIENT_ID}"
-        f"&redirect_uri={encoded_redirect}"
+        f"&redirect_uri={encoded}"
         "&response_type=code"
         "&scope=identify"
     )
-    return render_template_string(APPLY_OAUTH_HTML, oauth_url=oauth_url, website=VIREX_WEBSITE)
+    return render_template_string(APPLY_OAUTH_HTML,
+        oauth_url=oauth_url, website=VIREX_WEBSITE)
 
 
 @app.route("/apply/callback")
@@ -591,32 +540,30 @@ def apply_callback():
     error = request.args.get("error")
 
     if error or not code:
-        return render_template_string(ERROR_HTML, error="Discord login cancelled.", website=VIREX_WEBSITE), 400
+        return render_template_string(ERROR_HTML,
+            error="Discord login cancelled.", website=VIREX_WEBSITE), 400
 
     token_data = exchange_code(code, APPLY_OAUTH_URI)
     if not token_data:
-        return render_template_string(ERROR_HTML, error="Could not authenticate with Discord.", website=VIREX_WEBSITE), 500
+        return render_template_string(ERROR_HTML,
+            error="Could not authenticate with Discord.",
+            website=VIREX_WEBSITE), 500
 
     user = get_discord_user(token_data["access_token"])
     if not user:
-        return render_template_string(ERROR_HTML, error="Could not fetch Discord user.", website=VIREX_WEBSITE), 500
+        return render_template_string(ERROR_HTML,
+            error="Could not fetch Discord user.",
+            website=VIREX_WEBSITE), 500
 
     uid      = user["id"]
     username = user["username"]
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT 1 FROM applications
-                WHERE discord_id = %s AND status = 'pending'
-                LIMIT 1
-            """, (int(uid),))
-            already = cur.fetchone()
+    if run_async(_has_pending_application(uid)):
+        return render_template_string(APPLY_ALREADY_HTML,
+            username=username, website=VIREX_WEBSITE)
 
-    if already:
-        return render_template_string(APPLY_ALREADY_HTML, username=username, website=VIREX_WEBSITE)
-
-    return render_template_string(APPLY_FORM_HTML, discord_id=uid, username=username, website=VIREX_WEBSITE)
+    return render_template_string(APPLY_FORM_HTML,
+        discord_id=uid, username=username, website=VIREX_WEBSITE)
 
 
 @app.route("/apply/submit", methods=["POST"])
@@ -626,67 +573,42 @@ def apply_submit():
 
     if not discord_id:
         return render_template_string(ERROR_HTML,
-            error="Missing Discord ID. Please restart the application.", website=VIREX_WEBSITE), 400
+            error="Missing Discord ID. Please restart the application.",
+            website=VIREX_WEBSITE), 400
 
-    required = ["age", "timezone", "languages", "availability",
-                "discord_since", "previous_staff", "why_valora", "skills"]
-    for f in required:
+    for f in ["age", "timezone", "languages", "availability",
+              "discord_since", "previous_staff", "why_valora", "skills"]:
         if not request.form.get(f, "").strip():
             return render_template_string(ERROR_HTML,
                 error=f"Field '{f}' is required. Please go back and fill in all fields.",
                 website=VIREX_WEBSITE), 400
 
-    app_id         = str(uuid.uuid4())[:8].upper()
-    age            = request.form.get("age", "").strip()
-    tz             = request.form.get("timezone", "").strip()
-    languages      = request.form.get("languages", "").strip()
-    availability   = request.form.get("availability", "").strip()
-    discord_since  = request.form.get("discord_since", "").strip()
-    previous_staff = request.form.get("previous_staff", "").strip()[:600]
-    why_valora     = request.form.get("why_valora", "").strip()[:800]
-    skills         = request.form.get("skills", "").strip()[:600]
-    extra          = request.form.get("extra", "").strip()[:400]
+    app_id = str(uuid.uuid4())[:8].upper()
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO applications
-                    (app_id, discord_id, discord_username, submitted_at, status,
-                     age, timezone, languages, availability, discord_since,
-                     previous_staff, why_valora, skills, extra)
-                VALUES (%s, %s, %s, NOW(), 'pending',
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (app_id, int(discord_id), discord_username,
-                  age, tz, languages, availability, discord_since,
-                  previous_staff, why_valora, skills, extra))
-        conn.commit()
+    run_async(_insert_application(
+        app_id          = app_id,
+        discord_id      = discord_id,          # stored as TEXT (matches bot.py)
+        discord_username = discord_username,
+        age             = request.form.get("age", "").strip(),
+        tz              = request.form.get("timezone", "").strip(),
+        languages       = request.form.get("languages", "").strip(),
+        availability    = request.form.get("availability", "").strip(),
+        discord_since   = request.form.get("discord_since", "").strip(),
+        previous_staff  = request.form.get("previous_staff", "").strip()[:600],
+        why_valora      = request.form.get("why_valora", "").strip()[:800],
+        skills          = request.form.get("skills", "").strip()[:600],
+        extra_text      = request.form.get("extra", "").strip()[:400],
+    ))
 
+    # bot.py poll_applications picks this up within 10 seconds
     print(f"📋 New application: {app_id} from {discord_username} ({discord_id})")
-
-    message_id = send_application_to_discord(
-        discord_id=discord_id, username=discord_username,
-        age=age, tz=tz, languages=languages, availability=availability,
-        discord_since=discord_since, previous_staff=previous_staff,
-        why_valora=why_valora, skills=skills, extra=extra, app_id=app_id,
-    )
-
-    if message_id:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE applications
-                    SET message_id = %s, channel_id = %s
-                    WHERE app_id = %s
-                """, (message_id, STAFF_CHANNEL_ID, app_id))
-            conn.commit()
 
     return render_template_string(APPLY_SUCCESS_HTML,
         username=discord_username, app_id=app_id, website=VIREX_WEBSITE)
 
 
-# ── STARTUP ──────────────────────────────────────────────────
+# ── RUN ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    init_db()
     port = int(os.getenv("PORT", 5000))
     print(f"🌐 Virex web server running on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
