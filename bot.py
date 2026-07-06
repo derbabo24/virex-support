@@ -5,6 +5,14 @@
 #  /smedia command added
 #  poll_applications race condition fixed
 #  PostgreSQL backend for verified_data, tickets_data, applications_data
+#
+#  FIX (this version): every interaction callback that does slow work
+#  (creating channels, DB writes, sending DMs, editing messages) now
+#  calls interaction.response.defer(...) FIRST, then uses
+#  interaction.followup.send(...) for all further replies. This
+#  guarantees Discord always gets an ack within its 3-second window,
+#  which prevents the "Diese Interaktion ist fehlgeschlagen" error
+#  that can happen when Discord's API / your DB is briefly slow.
 # ============================================================
 
 import audioop  # noqa: F401 — audioop-lts shim for Python 3.13
@@ -741,9 +749,11 @@ class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
         self.app_id = app_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer immediately — everything below (DB write, embed edit, DM) can be slow.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         app_data = await db_get_application(self.app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            await interaction.followup.send("❌ Application not found.", ephemeral=True)
             return
         reason_text = self.reason.value.strip()
         await db_update_application(
@@ -755,7 +765,7 @@ class DenyReasonModal(discord.ui.Modal, title="Deny Application"):
         )
         await update_application_embed(self.app_id, "denied", interaction.user, reason_text)
         await notify_applicant(int(app_data["discord_id"]), "denied", reason_text)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(
                 description=f"❌ Application `{self.app_id}` denied."
                             + (f"\n**Reason:** {reason_text}" if reason_text else ""),
@@ -774,9 +784,11 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         self.app_id = app_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Defer immediately — everything below (DB write, embed edit, DM) can be slow.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         app_data = await db_get_application(self.app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True)
+            await interaction.followup.send("❌ Application not found.", ephemeral=True)
             return
         note_text = self.reason.value.strip()
         await db_update_application(
@@ -787,7 +799,7 @@ class OnHoldReasonModal(discord.ui.Modal, title="Put Application On Hold"):
         )
         await update_application_embed(self.app_id, "on_hold", interaction.user, note_text)
         await notify_applicant(int(app_data["discord_id"]), "on_hold", note_text)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(description=f"⏸️ Application `{self.app_id}` placed on hold.",
                                 color=VIREX_COLOR_WARN), ephemeral=True)
 
@@ -810,12 +822,14 @@ class ApplicationReviewView(discord.ui.View):
     async def accept_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
+        # Defer immediately — DB lookup, embed edit and DM send can all be slow.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         app_id   = await self._resolve_app_id(interaction.message.id)
         app_data = await db_get_application(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
+            await interaction.followup.send("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
-            await interaction.response.send_message("❌ Already reviewed.", ephemeral=True); return
+            await interaction.followup.send("❌ Already reviewed.", ephemeral=True); return
         await db_update_application(
             app_id,
             status="accepted",
@@ -824,7 +838,7 @@ class ApplicationReviewView(discord.ui.View):
         )
         await update_application_embed(app_id, "accepted", interaction.user)
         await notify_applicant(int(app_data["discord_id"]), "accepted")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(description=f"✅ Application `{app_id}` accepted! Applicant notified.",
                                 color=VIREX_COLOR_SUCCESS), ephemeral=True)
 
@@ -838,6 +852,8 @@ class ApplicationReviewView(discord.ui.View):
             await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
         if app_data.get("status") not in ("pending", "on_hold"):
             await interaction.response.send_message("❌ Already reviewed.", ephemeral=True); return
+        # NOTE: a modal must be the *first* response to the interaction, so we
+        # cannot defer() before this — keep the DB lookup above fast/lightweight.
         await interaction.response.send_modal(DenyReasonModal(app_id=app_id))
 
     @discord.ui.button(label="On Hold", style=discord.ButtonStyle.secondary, emoji="⏸️", custom_id="app_hold")
@@ -856,12 +872,14 @@ class ApplicationReviewView(discord.ui.View):
     async def interview_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Staff only.", ephemeral=True); return
+        # Defer immediately — resolving the app + creating a channel can be slow.
+        await interaction.response.defer(ephemeral=True, thinking=True)
         app_id   = await self._resolve_app_id(interaction.message.id)
         app_data = await db_get_application(app_id)
         if not app_data:
-            await interaction.response.send_message("❌ Application not found.", ephemeral=True); return
+            await interaction.followup.send("❌ Application not found.", ephemeral=True); return
         if app_data.get("interview_channel"):
-            await interaction.response.send_message("❌ Interview channel already exists.", ephemeral=True); return
+            await interaction.followup.send("❌ Interview channel already exists.", ephemeral=True); return
 
         guild        = interaction.guild
         applicant_id = app_data.get("discord_id")
@@ -888,7 +906,7 @@ class ApplicationReviewView(discord.ui.View):
                 category=cat_channel, topic=f"Staff Application Interview | app_id:{app_id}"
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Could not create channel: {e}", ephemeral=True); return
+            await interaction.followup.send(f"❌ Could not create channel: {e}", ephemeral=True); return
 
         embed = discord.Embed(
             title="🎫 Staff Application — Interview Channel",
@@ -903,7 +921,7 @@ class ApplicationReviewView(discord.ui.View):
             embed=embed
         )
         await db_update_application(app_id, interview_channel=channel.id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=discord.Embed(description=f"✅ Interview channel created: {channel.mention}", color=VIREX_COLOR),
             ephemeral=True)
 
@@ -1000,9 +1018,14 @@ class TicketSelect(discord.ui.Select):
         cat_key = self.values[0]
         cat     = TICKET_CATEGORIES[cat_key]
         guild   = interaction.guild
+
+        # Defer immediately — channel creation + DB write can take >3s and would
+        # otherwise trigger Discord's "Interaktion fehlgeschlagen" error.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
         for ch in guild.text_channels:
             if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
-                await interaction.response.send_message(
+                await interaction.followup.send(
                     f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
                 return
         overwrites = {
@@ -1022,7 +1045,7 @@ class TicketSelect(discord.ui.Select):
                 topic=f"uid-{interaction.user.id} | {cat_key} | open"
             )
         except Exception as e:
-            await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
             return
         await db_set_ticket(str(channel.id), {
             "user_id": interaction.user.id, "category": cat_key,
@@ -1030,7 +1053,7 @@ class TicketSelect(discord.ui.Select):
             "last_activity": datetime.now(timezone.utc).isoformat(),
             "auto_close": True, "status": "open"
         })
-        await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+        await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
         embed = discord.Embed(
             title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
             description=(f"Welcome, {interaction.user.mention}! 👋\n\n**Our support team will be with you shortly.**\n\n"
@@ -1273,10 +1296,13 @@ async def on_interaction(interaction: discord.Interaction):
     if interaction.data.get("custom_id") != "virex_media_ticket":
         return
 
+    # Defer immediately — channel creation + DB write can take >3s.
+    await interaction.response.defer(ephemeral=True, thinking=True)
+
     guild = interaction.guild
     for ch in guild.text_channels:
         if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
             return
 
@@ -1298,7 +1324,7 @@ async def on_interaction(interaction: discord.Interaction):
             topic=f"uid-{interaction.user.id} | support | open"
         )
     except Exception as e:
-        await interaction.response.send_message(f"❌ Could not create ticket: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
         return
 
     await db_set_ticket(str(ch.id), {
@@ -1307,7 +1333,7 @@ async def on_interaction(interaction: discord.Interaction):
         "last_activity": datetime.now(timezone.utc).isoformat(),
         "auto_close": True, "status": "open"
     })
-    await interaction.response.send_message(f"✅ Ticket created: {ch.mention}", ephemeral=True)
+    await interaction.followup.send(f"✅ Ticket created: {ch.mention}", ephemeral=True)
 
     embed = discord.Embed(
         title="🎬 Media Creator Application",
