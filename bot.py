@@ -1020,68 +1020,129 @@ async def _post_application(app_id: str) -> bool:
 # ============================================================
 #  VIEWS — TICKETS
 # ============================================================
+class TicketQuestionsModal(discord.ui.Modal):
+    def __init__(self, cat_key: str):
+        cat = TICKET_CATEGORIES[cat_key]
+        super().__init__(title=f"Open Ticket — {cat['label']}"[:45])
+        self.cat_key = cat_key
+        self.reason = discord.ui.TextInput(
+            label="What is the reason for your request?",
+            style=discord.TextStyle.paragraph, required=True, max_length=500)
+        self.order_id = discord.ui.TextInput(
+            label="What is your order ID?", required=False, max_length=100)
+        self.product = discord.ui.TextInput(
+            label="What product do you need help with?", required=False, max_length=200)
+        self.add_item(self.reason)
+        self.add_item(self.order_id)
+        self.add_item(self.product)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await create_ticket_channel(
+                interaction, cat_key=self.cat_key,
+                reason=self.reason.value.strip(),
+                order_id=self.order_id.value.strip(),
+                product=self.product.value.strip())
+        except Exception as e:
+            print(f"[TICKET CREATE ERROR] {type(e).__name__}: {e}")
+            try:
+                await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
+            except discord.HTTPException:
+                pass
+
+
+async def create_ticket_channel(interaction: discord.Interaction, cat_key: str,
+                                reason: str, order_id: str, product: str):
+    guild = interaction.guild
+    cat   = TICKET_CATEGORIES[cat_key]
+
+    for ch in guild.text_channels:
+        if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
+            await interaction.followup.send(
+                f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
+            return
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user:   discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                        attach_files=True, read_message_history=True),
+        guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                        manage_channels=True, read_message_history=True),
+    }
+    for rid in STAFF_ROLE_IDS + ADMIN_ROLE_IDS:
+        role = guild.get_role(rid)
+        if role:
+            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                           read_message_history=True)
+
+    parent = get_ticket_category_channel(guild, cat_key)
+    num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+
+    try:
+        channel = await guild.create_text_channel(
+            name=f"ticket-{num:04d}", overwrites=overwrites, category=parent,
+            topic=f"uid-{interaction.user.id} | {cat_key} | open")
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
+        return
+
+    await db_set_ticket(str(channel.id), {
+        "user_id": interaction.user.id, "category": cat_key,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_activity": datetime.now(timezone.utc).isoformat(),
+        "auto_close": True, "status": "open"})
+
+    await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+
+    embed = discord.Embed(
+        title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
+        description=(
+            "Thank you for creating a support ticket. While you wait for a support "
+            "agent to promptly assist you in your inquiry, please review the "
+            "information you provided below.\n\n"
+            "**While you wait...**\n"
+            "👤 A support agent will be with you shortly. Please provide clear "
+            "screenshots if an error has occurred.\n\n"
+            "**NO MOD WILL REQUEST THE TRANSFER OF A TICKET TO DMS FOR PAYMENTS. "
+            "CONTACT MANAGEMENT IF THIS HAPPENS!**"),
+        color=cat["color"], timestamp=datetime.now(timezone.utc))
+    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
+        embed.set_author(name="Support Ticket", icon_url=VIREX_LOGO)
+    else:
+        embed.set_author(name="Support Ticket")
+    embed.add_field(name="What is the reason for your request?",
+                    value=f"> {reason}" if reason else "> —", inline=False)
+    embed.add_field(name="What is your order ID?",
+                    value=f"> {order_id}" if order_id else "> —", inline=False)
+    embed.add_field(name="What product do you need help with?",
+                    value=f"> {product}" if product else "> —", inline=False)
+    if TICKET_OPEN_BANNER.startswith("https://"):
+        embed.set_image(url=TICKET_OPEN_BANNER)
+    embed.set_footer(text="Virex • Premium Products 💎")
+
+    await channel.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
+
+
 class TicketSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
             placeholder="Select a category to open a ticket...",
             min_values=1, max_values=1, custom_id="virex_ticket_select",
-            options=[discord.SelectOption(label=v["label"], description=v["description"], emoji=v["emoji"], value=k)
-                     for k, v in TICKET_CATEGORIES.items()]
-        )
+            options=[
+                discord.SelectOption(label=v["label"], description=v["description"],
+                                     emoji=v["emoji"], value=k)
+                for k, v in TICKET_CATEGORIES.items()])
 
     async def callback(self, interaction: discord.Interaction):
         cat_key = self.values[0]
-        cat     = TICKET_CATEGORIES[cat_key]
-        guild   = interaction.guild
-
-        # Defer immediately — channel creation + DB write can take >3s and would
-        # otherwise trigger Discord's "Interaktion fehlgeschlagen" error.
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
+        guild = interaction.guild
         for ch in guild.text_channels:
             if ch.topic and f"uid-{interaction.user.id}" in ch.topic:
-                await interaction.followup.send(
+                await interaction.response.send_message(
                     f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
                 return
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user:   discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, read_message_history=True),
-        }
-        for rid in STAFF_ROLE_IDS + ADMIN_ROLE_IDS:
-            role = guild.get_role(rid)
-            if role:
-                overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
-        num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
-        try:
-            channel = await guild.create_text_channel(
-                name=f"ticket-{num:04d}", overwrites=overwrites, category=cat_channel,
-                topic=f"uid-{interaction.user.id} | {cat_key} | open"
-            )
-        except Exception as e:
-            await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
-            return
-        await db_set_ticket(str(channel.id), {
-            "user_id": interaction.user.id, "category": cat_key,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "last_activity": datetime.now(timezone.utc).isoformat(),
-            "auto_close": True, "status": "open"
-        })
-        await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
-        embed = discord.Embed(
-            title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
-            description=(f"Welcome, {interaction.user.mention}! 👋\n\n**Our support team will be with you shortly.**\n\n"
-                         f"🌐 **Website:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n\n"
-                         "Please describe your issue and we'll get back to you as soon as possible."),
-            color=cat["color"], timestamp=datetime.now(timezone.utc)
-        )
-        set_logo(embed)
-        embed.set_footer(text="Virex • Premium Products")
-        await channel.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
-
-
-class TicketPanelView(discord.ui.View):
+        await interaction.response.send_modal(TicketQuestionsModal(cat_key))
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketSelect())
