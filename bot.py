@@ -1143,6 +1143,9 @@ class TicketSelect(discord.ui.Select):
                     f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
                 return
         await interaction.response.send_modal(TicketQuestionsModal(cat_key))
+
+
+class TicketPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(TicketSelect())
@@ -1446,6 +1449,8 @@ async def cmd_panel(interaction: discord.Interaction):
     )
     set_logo(embed)
     embed.set_footer(text="Virex • Premium Products 💎")
+    if TICKET_PANEL_BANNER.startswith("https://"):
+        embed.set_image(url=TICKET_PANEL_BANNER)
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.followup.send("✅ Panel sent!", ephemeral=True)
 
