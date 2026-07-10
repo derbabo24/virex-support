@@ -69,12 +69,15 @@ WELCOME_CHANNEL_ID       = int(os.getenv("WELCOME_CHANNEL_ID", 0))
 DATABASE_URL             = os.getenv("DATABASE_URL", "")
 
 TICKET_CATEGORIES = {
-    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",       "emoji": "🛒", "color": VIREX_COLOR},
-    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.",  "emoji": "💰", "color": 0xF0A500},
-    "claim":    {"label": "Claim Role / Key",        "description": "Claim your role or product key.",     "emoji": "🔑", "color": VIREX_COLOR_SUCCESS},
-    "hwid":     {"label": "HWID Reset",              "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xE07B39},
-    "support":  {"label": "Get Support",             "description": "Request support from our staff.",     "emoji": "🎫", "color": VIREX_COLOR},
+    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",      "emoji": "🛒", "color": VIREX_COLOR,         "category_env": "TICKET_CAT_PURCHASE"},
+    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.", "emoji": "💰", "color": 0xF0A500,            "category_env": "TICKET_CAT_RESELLER"},
+    "claim":    {"label": "Claim Role / Key",       "description": "Claim your role or product key.",    "emoji": "🔑", "color": VIREX_COLOR_SUCCESS, "category_env": "TICKET_CAT_CLAIM"},
+    "hwid":     {"label": "HWID Reset",             "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xE07B39,            "category_env": "TICKET_CAT_HWID"},
+    "support":  {"label": "Get Support",            "description": "Request support from our staff.",     "emoji": "🎫", "color": VIREX_COLOR,         "category_env": "TICKET_CAT_SUPPORT"},
 }
+
+TICKET_PANEL_BANNER = os.getenv("TICKET_PANEL_BANNER", "").strip()
+TICKET_OPEN_BANNER  = os.getenv("TICKET_OPEN_BANNER", "").strip()
 
 # ============================================================
 #  LOGO HELPER
