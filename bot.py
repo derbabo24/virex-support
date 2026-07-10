@@ -79,6 +79,18 @@ TICKET_CATEGORIES = {
 TICKET_PANEL_BANNER = os.getenv("TICKET_PANEL_BANNER", "").strip()
 TICKET_OPEN_BANNER  = os.getenv("TICKET_OPEN_BANNER", "").strip()
 
+
+def get_ticket_category_channel(guild: discord.Guild, cat_key: str):
+    """Discord-Kategorie für diesen Ticket-Typ: eigene falls per Railway-Variable
+    gesetzt, sonst TICKET_CATEGORY_ID."""
+    info = TICKET_CATEGORIES.get(cat_key, {})
+    env_name = info.get("category_env")
+    specific = os.getenv(env_name, "").strip() if env_name else ""
+    chosen = specific if specific.isdigit() else str(TICKET_CATEGORY_ID or "")
+    if not chosen.isdigit():
+        return None
+    ch = guild.get_channel(int(chosen))
+    return ch if isinstance(ch, discord.CategoryChannel) else None
 # ============================================================
 #  LOGO HELPER
 # ============================================================
