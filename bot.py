@@ -4,6 +4,7 @@
 #  Join/Leave welcome channel added
 #  /smedia command added
 #  PostgreSQL backend for verified_data, tickets_data
+#  Leaderboard / Points system added (/leaderboard, /givepoints, /removepoints)
 #
 #  FIX (this version): every interaction callback that does slow work
 #  (creating channels, DB writes, sending DMs, editing messages) now
@@ -62,6 +63,11 @@ WELCOME_CHANNEL_ID       = int(os.getenv("WELCOME_CHANNEL_ID", 0))
 
 # PostgreSQL
 DATABASE_URL             = os.getenv("DATABASE_URL", "")
+
+# Leaderboard / Points
+OWNER_ID                 = int(os.getenv("OWNER_ID", 0))          # NUR diese User-ID darf Punkte geben/entfernen
+SUPPORT_ROLE_ID          = int(os.getenv("SUPPORT_ROLE_ID", 0))   # Trial Staff / Support Rolle
+POINTS_PER_MESSAGE       = int(os.getenv("POINTS_PER_MESSAGE", 2))
 
 TICKET_CATEGORIES = {
     "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",      "emoji": "🛒", "color": VIREX_COLOR,         "category_env": "TICKET_CAT_PURCHASE"},
@@ -125,6 +131,14 @@ async def init_db():
                 last_activity   TIMESTAMPTZ,
                 auto_close      BOOLEAN DEFAULT TRUE,
                 status          TEXT DEFAULT 'open'
+            );
+
+            CREATE TABLE IF NOT EXISTS staff_points (
+                user_id     TEXT PRIMARY KEY,
+                username    TEXT,
+                points      BIGINT DEFAULT 0,
+                available   BIGINT DEFAULT 0,
+                updated_at  TIMESTAMPTZ
             );
 
         """)
@@ -279,6 +293,44 @@ async def db_all_tickets() -> dict:
     return result
 
 # ============================================================
+#  STAFF POINTS — DB HELPERS
+# ============================================================
+async def db_add_points(user_id: str, username: str, amount: int):
+    """Erhöht Points UND Available (z.B. +2 pro Ticket-Nachricht oder /givepoints)."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO staff_points (user_id, username, points, available, updated_at)
+            VALUES ($1, $2, $3, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username   = EXCLUDED.username,
+                points     = staff_points.points + EXCLUDED.points,
+                available  = staff_points.available + EXCLUDED.available,
+                updated_at = EXCLUDED.updated_at
+        """, user_id, username, amount, datetime.now(timezone.utc))
+
+async def db_remove_available(user_id: str, username: str, amount: int):
+    """Zieht NUR vom Available ab (Points bleiben als Historie erhalten)."""
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO staff_points (user_id, username, points, available, updated_at)
+            VALUES ($1, $2, 0, $3, $4)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username   = EXCLUDED.username,
+                available  = staff_points.available + EXCLUDED.available,
+                updated_at = EXCLUDED.updated_at
+        """, user_id, username, -amount, datetime.now(timezone.utc))
+
+async def db_get_points(user_id: str) -> dict | None:
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM staff_points WHERE user_id = $1", user_id)
+    return dict(row) if row else None
+
+async def db_all_points() -> dict:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM staff_points")
+    return {r["user_id"]: dict(r) for r in rows}
+
+# ============================================================
 #  UTILITY
 # ============================================================
 def _parse_ts(value):
@@ -321,6 +373,16 @@ def is_admin(member: discord.Member) -> bool:
     if member.guild_permissions.administrator:
         return True
     return any(r.id in ADMIN_ROLE_IDS for r in member.roles)
+
+def has_support_role(member: discord.Member) -> bool:
+    """True, wenn das Mitglied die Trial-Staff / Support-Rolle hat (für Leaderboard-Punkte)."""
+    if SUPPORT_ROLE_ID == 0:
+        return False
+    return any(r.id == SUPPORT_ROLE_ID for r in member.roles)
+
+def is_owner(user: discord.abc.User) -> bool:
+    """Nur diese eine User-ID darf /givepoints und /removepoints nutzen."""
+    return OWNER_ID != 0 and user.id == OWNER_ID
 
 # ============================================================
 #  TOKEN REFRESH — keeps backup tokens alive FOREVER
@@ -823,11 +885,17 @@ async def on_message(message: discord.Message):
         await message.channel.send(text)
         return
 
-    # Update ticket last_activity
+    # Update ticket last_activity + Leaderboard-Punkte
     cid  = str(message.channel.id)
     info = await db_get_ticket(cid)
     if info and info.get("status") == "open":
         await db_update_ticket(cid, last_activity=datetime.now(timezone.utc).isoformat())
+        # +POINTS_PER_MESSAGE Punkte pro Nachricht im Ticket-Channel
+        # NUR für Mitglieder mit der Trial-Staff / Support-Rolle
+        if isinstance(message.author, discord.Member) and has_support_role(message.author):
+            await db_add_points(str(message.author.id),
+                                message.author.display_name,
+                                POINTS_PER_MESSAGE)
 
     await bot.process_commands(message)
 
@@ -1072,6 +1140,92 @@ async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
     status = "✅ enabled" if enabled else "❌ disabled"
     await interaction.response.send_message(
         embed=discord.Embed(description=f"Auto-close is now **{status}** for this ticket.", color=VIREX_COLOR))
+
+# ============================================================
+#  SLASH — LEADERBOARD / POINTS
+# ============================================================
+@bot.tree.command(name="leaderboard", description="Zeigt das Support-Punkte Leaderboard an")
+@app_commands.guild_only()
+async def cmd_leaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+    guild = interaction.guild
+    role  = guild.get_role(SUPPORT_ROLE_ID) if SUPPORT_ROLE_ID else None
+    if not role:
+        await interaction.followup.send(
+            "❌ `SUPPORT_ROLE_ID` ist nicht gesetzt oder die Rolle wurde nicht gefunden.")
+        return
+
+    all_pts = await db_all_points()
+    entries = []
+    for member in role.members:
+        p = all_pts.get(str(member.id), {})
+        entries.append((member,
+                        int(p.get("points", 0) or 0),
+                        int(p.get("available", 0) or 0)))
+    # Nach Points absteigend sortieren
+    entries.sort(key=lambda e: e[1], reverse=True)
+
+    if not entries:
+        await interaction.followup.send("📭 Keine Mitglieder mit der Support-Rolle gefunden.")
+        return
+
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines  = []
+    for i, (member, points, available) in enumerate(entries, start=1):
+        rank = medals.get(i, f"**{i}.**")
+        lines.append(f"{rank} {member.mention}\nPoints: `{points}` | Available: `{available}`")
+
+    # In Blöcke splitten (Embed-Description-Limit)
+    chunks, chunk, length = [], [], 0
+    for line in lines:
+        if length + len(line) > 3800:
+            chunks.append(chunk); chunk, length = [line], len(line) + 2
+        else:
+            chunk.append(line); length += len(line) + 2
+    if chunk: chunks.append(chunk)
+
+    for i, ch in enumerate(chunks):
+        embed = discord.Embed(
+            title=f"🏆 Support Points Leaderboard{' (Fortsetzung)' if i else ''}",
+            description="\n\n".join(ch),
+            color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        )
+        if i == 0:
+            set_logo(embed)
+        embed.set_footer(text=f"Virex • Leaderboard • {len(entries)} Support-Mitglieder")
+        await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="givepoints", description="Punkte an einen User vergeben (nur Owner)")
+@app_commands.describe(user="User, der Punkte bekommt", amount="Anzahl der Punkte")
+@app_commands.guild_only()
+async def cmd_givepoints(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("❌ Nur der Bot-Owner darf diesen Befehl nutzen.", ephemeral=True); return
+    if amount <= 0:
+        await interaction.response.send_message("❌ Bitte eine positive Zahl angeben.", ephemeral=True); return
+    await db_add_points(str(user.id), user.display_name, amount)
+    row = await db_get_points(str(user.id))
+    await interaction.response.send_message(embed=discord.Embed(
+        description=(f"✅ **{amount}** Punkte an {user.mention} vergeben.\n"
+                     f"Points: `{row['points']}` | Available: `{row['available']}`"),
+        color=VIREX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc)))
+
+
+@bot.tree.command(name="removepoints", description="Punkte von einem User entfernen (nur Owner)")
+@app_commands.describe(user="User, dem Punkte abgezogen werden", amount="Anzahl der Punkte")
+@app_commands.guild_only()
+async def cmd_removepoints(interaction: discord.Interaction, user: discord.Member, amount: int):
+    if not is_owner(interaction.user):
+        await interaction.response.send_message("❌ Nur der Bot-Owner darf diesen Befehl nutzen.", ephemeral=True); return
+    if amount <= 0:
+        await interaction.response.send_message("❌ Bitte eine positive Zahl angeben.", ephemeral=True); return
+    await db_remove_available(str(user.id), user.display_name, amount)
+    row = await db_get_points(str(user.id))
+    await interaction.response.send_message(embed=discord.Embed(
+        description=(f"➖ **{amount}** Punkte (Available) von {user.mention} entfernt.\n"
+                     f"Points: `{row['points']}` | Available: `{row['available']}`"),
+        color=VIREX_COLOR_DANGER, timestamp=datetime.now(timezone.utc)))
 
 # ============================================================
 #  SLASH — SMEDIA
