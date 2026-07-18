@@ -53,7 +53,7 @@ CHANGELOG_CHANNEL_ID = 1524959757499371620
 CUSTOMER_ROLE_NAME = "customer"
 MESSAGE_LOG_CHANNEL_ID = 1524959786871820309
 VOUCH_CHANNEL_ID = 1502194368059146290
-R6_GUIDE_URL = "https://virexguide.com/guide"
+R6_GUIDE_URL = "worker-production-a944.up.railway.app"
 
 # ============================================================
 #  CONFIG — TICKETS / VERIFY / BACKUP
