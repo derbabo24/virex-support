@@ -23,8 +23,7 @@ CHANGELOG_CHANNEL_ID = 1524959757499371620
 CUSTOMER_ROLE_NAME = "customer"
 MESSAGE_LOG_CHANNEL_ID = 1524959786871820309
 VOUCH_CHANNEL_ID = 1502194368059146290
-WEBSITE_URL = "https://vireex.cc"
-R6_GUIDE_URL = "https://vireex.cc/guide"
+R6_GUIDE_URL = "https://virexguide.com/guide"
 # ─── DATABASE CONFIG ──────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
 # ─── PRODUCT STATUS ───────────────────────────────────────────────────────────
@@ -425,7 +424,7 @@ class BanRequestView(discord.ui.View):
 async def on_ready():
     global vouch_counter, whitelist_cache
     print(f"✅ Logged in as {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="vireex.cc | $manual"))
+    await bot.change_presence(activity=discord.Game(name="virex.gg | $manual"))
     # Load whitelist from database into memory
     whitelist_cache = await db_load_whitelist()
     print(f"✅ Whitelist cache loaded: {len(whitelist_cache)} user(s)")
@@ -931,7 +930,7 @@ async def r6guide(interaction: discord.Interaction):
         description=f"**[🔗 Click here to open the full guide]({R6_GUIDE_URL})**",
         color=0x0A84FF
     )
-    embed.set_footer(text="Virex Team • vireex.cc")
+    embed.set_footer(text="Virex Team • virex.gg")
     await interaction.response.send_message(embed=embed)
 # ─── STATUS COMMANDS ──────────────────────────────────────────────────────────
 @bot.tree.command(name="status", description="Show the current product status")
