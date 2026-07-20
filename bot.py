@@ -98,6 +98,25 @@ TICKET_CATEGORIES = {
 TICKET_PANEL_BANNER = os.getenv("TICKET_PANEL_BANNER", "").strip()
 TICKET_OPEN_BANNER  = os.getenv("TICKET_OPEN_BANNER", "").strip()
 
+# ============================================================
+#  CONFIG — CLAIM ROLE / SELLAUTH
+# ============================================================
+# API key:  SellAuth Dashboard → Account → API Access
+# Shop ID:  the integer in your dashboard URL / API paths
+SELLAUTH_API_KEY   = os.getenv("SELLAUTH_API_KEY", "").strip()
+SELLAUTH_SHOP_ID   = os.getenv("SELLAUTH_SHOP_ID", "").strip()
+SELLAUTH_API_BASE  = os.getenv("SELLAUTH_API_BASE", "https://api.sellauth.com/v1").rstrip("/")
+# Role granted on a successful claim. Defaults to the existing customer role.
+CLAIM_ROLE_NAME    = os.getenv("CLAIM_ROLE_NAME", CUSTOMER_ROLE_NAME)
+# Optional channel to log successful/failed claims (0 = disabled).
+CLAIM_LOG_CHANNEL_ID = int(os.getenv("CLAIM_LOG_CHANNEL_ID", 0))
+# How long (seconds) the DM verification session waits for each reply.
+CLAIM_DM_TIMEOUT   = int(os.getenv("CLAIM_DM_TIMEOUT", 300))
+# Only orders with one of these statuses can be claimed.
+CLAIM_VALID_STATUSES = {"completed"}
+# Users currently in the middle of a DM claim session (prevents double sessions).
+claim_in_progress: set[int] = set()
+
 # ─── PRODUCT STATUS ───────────────────────────────────────────────────────────
 product_status: dict[str, str] = {
     "Lethal Lite":       "Testing",
@@ -245,7 +264,18 @@ async def init_db() -> bool:
                     status          TEXT DEFAULT 'open'
                 )
             ''')
-        print("✅ Database ready (blacklist, whitelist, verified_users, tickets)")
+            # ── Claim-Role table ────────────────────────────────────────────
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS claimed_orders (
+                    order_key   TEXT PRIMARY KEY,   -- canonical invoice id (as text)
+                    invoice_id  TEXT,
+                    email       TEXT,
+                    claimed_by  BIGINT,
+                    guild_id    BIGINT,
+                    claimed_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+            ''')
+        print("✅ Database ready (blacklist, whitelist, verified_users, tickets, claimed_orders)")
         return True
     except Exception as e:
         print(f"❌ Database error: {e}")
@@ -378,6 +408,41 @@ async def db_get_whitelist(guild_id: int) -> list:
     except Exception as e:
         print(f"❌ Error fetching whitelist: {e}")
         return []
+
+# ── Claimed-orders DB helpers ─────────────────────────────────────────────────
+async def db_get_claim(order_key: str) -> dict | None:
+    """Return the claim record for an order, or None if unclaimed."""
+    if not db_pool:
+        return None
+    try:
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT order_key, invoice_id, email, claimed_by, guild_id, claimed_at '
+                'FROM claimed_orders WHERE order_key = $1', str(order_key))
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"❌ Error fetching claim: {e}")
+        return None
+
+
+async def db_mark_order_claimed(order_key: str, invoice_id: str, email: str,
+                                claimed_by: int, guild_id: int) -> bool:
+    """Insert a claim. Returns False if the order was already claimed (race-safe)."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.execute('''
+                INSERT INTO claimed_orders (order_key, invoice_id, email, claimed_by, guild_id)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (order_key) DO NOTHING
+            ''', str(order_key), str(invoice_id), (email or "").lower(), claimed_by, guild_id)
+        # asyncpg returns "INSERT 0 1" on success, "INSERT 0 0" if the row already existed
+        return result.endswith(" 1")
+    except Exception as e:
+        print(f"❌ Error marking order claimed: {e}")
+        return False
+
 
 # ============================================================
 #  UTILITY
@@ -1413,6 +1478,313 @@ async def before_token_refresh():
 # ============================================================
 #  EVENTS  (jeweils EIN Handler — beide Bots zusammengeführt)
 # ============================================================
+# ============================================================
+#  CLAIM ROLE — SELLAUTH ORDER VERIFICATION
+# ============================================================
+def _norm(s) -> str:
+    return str(s or "").strip().lower()
+
+
+def _order_id_candidates(inv: dict) -> set[str]:
+    """All identifier strings that could legitimately represent this invoice,
+    so we match whatever format the customer pastes (numeric id, salt, or the
+    full unique_id like 'ba1181294bc7a-0000000000971')."""
+    cands: set[str] = set()
+    iid  = str(inv.get("id", "")).strip()
+    salt = str(inv.get("salt", "")).strip()
+    uid  = str(inv.get("unique_id", "")).strip()
+    if iid:
+        cands.add(iid)
+    if salt:
+        cands.add(salt)
+    if uid:
+        cands.add(uid)
+    if salt and iid.isdigit():
+        cands.add(f"{salt}-{int(iid):013d}")   # reconstruct unique_id format
+    return {c.lower() for c in cands if c}
+
+
+def _order_matches(inv: dict, raw_order_id: str) -> bool:
+    raw = _norm(raw_order_id)
+    if not raw:
+        return False
+    cands = _order_id_candidates(inv)
+    if raw in cands:
+        return True
+    # If the user pasted a unique_id-style string, also try its numeric tail.
+    if "-" in raw:
+        tail = raw.rsplit("-", 1)[-1].lstrip("0") or "0"
+        if tail in cands:
+            return True
+    # If they pasted only the numeric id, compare int-wise to invoice id.
+    if raw.isdigit() and str(inv.get("id", "")).isdigit():
+        return int(raw) == int(inv["id"])
+    return False
+
+
+async def sellauth_lookup_order(order_id_raw: str, email: str) -> dict:
+    """Look an order up in SellAuth by email, then match the order id locally.
+
+    Returns:
+        {"ok": True,  "invoice": {...}}                         on a valid match
+        {"ok": False, "reason": "<machine reason>", "detail": "<human text>"}
+    """
+    if not SELLAUTH_API_KEY or not SELLAUTH_SHOP_ID:
+        return {"ok": False, "reason": "not_configured",
+                "detail": "The claim system is not configured yet. Please contact staff."}
+
+    url = f"{SELLAUTH_API_BASE}/shops/{SELLAUTH_SHOP_ID}/invoices"
+    headers = {
+        "Authorization": f"Bearer {SELLAUTH_API_KEY}",
+        "Content-Type":  "application/json",
+        "Accept":        "application/json",
+    }
+    # Filter by email server-side; we match the order id + status ourselves.
+    params = {"email": email.strip(), "perPage": 100}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                text = await resp.text()
+                if resp.status == 401:
+                    print("[CLAIM] SellAuth 401 — check SELLAUTH_API_KEY")
+                    return {"ok": False, "reason": "auth_error",
+                            "detail": "The claim system could not authenticate with the store. Please contact staff."}
+                if resp.status == 404:
+                    return {"ok": False, "reason": "shop_not_found",
+                            "detail": "Store not found. Please contact staff (check SELLAUTH_SHOP_ID)."}
+                if resp.status != 200:
+                    print(f"[CLAIM] SellAuth {resp.status}: {text[:300]}")
+                    return {"ok": False, "reason": "api_error",
+                            "detail": f"The store returned an error ({resp.status}). Please try again later."}
+                try:
+                    data = await resp.json()
+                except Exception:
+                    print(f"[CLAIM] SellAuth non-JSON response: {text[:300]}")
+                    return {"ok": False, "reason": "api_error",
+                            "detail": "Unexpected response from the store. Please try again later."}
+    except asyncio.TimeoutError:
+        return {"ok": False, "reason": "timeout",
+                "detail": "The store took too long to respond. Please try again in a moment."}
+    except Exception as e:
+        print(f"[CLAIM] SellAuth exception: {type(e).__name__}: {e}")
+        return {"ok": False, "reason": "exception",
+                "detail": "Could not reach the store right now. Please try again later."}
+
+    invoices = data.get("data", data if isinstance(data, list) else [])
+    if not isinstance(invoices, list):
+        invoices = []
+
+    # 1) find an invoice whose id matches (email already filtered, but double-check it)
+    matched = None
+    for inv in invoices:
+        if not isinstance(inv, dict):
+            continue
+        if _norm(inv.get("email")) != _norm(email):
+            continue
+        if _order_matches(inv, order_id_raw):
+            matched = inv
+            break
+
+    if not matched:
+        return {"ok": False, "reason": "no_match",
+                "detail": "No order was found matching that **order ID** and **email**.\n"
+                          "Double-check both and make sure you use the email you ordered with."}
+
+    # 2) status must be a completed/paid order
+    if _norm(matched.get("status")) not in CLAIM_VALID_STATUSES:
+        return {"ok": False, "reason": "not_completed",
+                "detail": f"That order is not completed (status: `{matched.get('status')}`). "
+                          "Only fully paid orders can be claimed."}
+
+    return {"ok": True, "invoice": matched}
+
+
+async def _claim_log(guild: discord.Guild, embed: discord.Embed):
+    if not CLAIM_LOG_CHANNEL_ID:
+        return
+    ch = guild.get_channel(CLAIM_LOG_CHANNEL_ID) if guild else None
+    if ch:
+        try:
+            await ch.send(embed=embed)
+        except discord.HTTPException:
+            pass
+
+
+async def process_claim(member: discord.Member, guild: discord.Guild,
+                        order_id_raw: str, email: str) -> tuple[bool, str]:
+    """Verify an order and grant the claim role. Returns (success, message)."""
+    lookup = await sellauth_lookup_order(order_id_raw, email)
+    if not lookup["ok"]:
+        return False, f"❌ {lookup['detail']}"
+
+    inv        = lookup["invoice"]
+    order_key  = str(inv.get("id"))            # canonical dedupe key
+    inv_email  = inv.get("email", email)
+
+    # Already claimed?
+    existing = await db_get_claim(order_key)
+    if existing:
+        if existing["claimed_by"] == member.id:
+            return False, "ℹ️ You have **already claimed** this order — you should already have the role."
+        return False, ("❌ This order has **already been claimed** by another account. "
+                       "If you believe this is a mistake, please open a support ticket.")
+
+    # Find + grant the role
+    role = discord.utils.find(lambda r: r.name.lower() == CLAIM_ROLE_NAME.lower(), guild.roles)
+    if not role:
+        return False, f"❌ The `{CLAIM_ROLE_NAME}` role does not exist on the server. Please contact staff."
+    if role >= guild.me.top_role:
+        return False, "❌ I can't assign the role because it's above my highest role. Please contact staff."
+
+    # Reserve the order atomically BEFORE assigning, so it can't be double-claimed.
+    reserved = await db_mark_order_claimed(order_key, order_key, inv_email, member.id, guild.id)
+    if not reserved:
+        return False, ("❌ This order has **already been claimed**. "
+                       "If you believe this is a mistake, please open a support ticket.")
+
+    try:
+        await member.add_roles(role, reason=f"Claimed SellAuth order {order_key}")
+    except discord.Forbidden:
+        return False, "❌ I don't have permission to give you the role. Please contact staff."
+    except discord.HTTPException as e:
+        print(f"[CLAIM] add_roles failed: {e}")
+        return False, "❌ Something went wrong assigning the role. Please try again or contact staff."
+
+    # Log
+    log_embed = discord.Embed(
+        title="✅ Customer Role Claimed",
+        color=VIREX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc))
+    log_embed.add_field(name="User",     value=f"{member.mention} (`{member.id}`)", inline=True)
+    log_embed.add_field(name="Order ID", value=f"`{order_key}`", inline=True)
+    log_embed.add_field(name="Email",    value=f"`{inv_email}`", inline=False)
+    log_embed.set_footer(text="Virex • Claim System")
+    await _claim_log(guild, log_embed)
+
+    return True, (f"✅ **Verified!** You've been given the **{role.name}** role in **{guild.name}**.\n"
+                  f"Thank you for your purchase! 💎")
+
+
+async def start_claim_dm(interaction: discord.Interaction):
+    """Runs the button → DM → order id → email → verify flow."""
+    user  = interaction.user
+    guild = interaction.guild
+
+    if user.id in claim_in_progress:
+        await interaction.response.send_message(
+            "⏳ You already have a claim session open — check your DMs.", ephemeral=True)
+        return
+
+    # Try to open a DM first so we can tell the user immediately if DMs are closed.
+    try:
+        dm = await user.create_dm()
+        await dm.send(embed=discord.Embed(
+            title="🔑 Claim Your Customer Role",
+            description=("Let's verify your purchase.\n\n"
+                         "**Step 1/2 — Reply with your `Order ID`.**\n"
+                         "You can find it on your SellAuth receipt / order confirmation.\n\n"
+                         f"*You have {CLAIM_DM_TIMEOUT // 60} minutes. Type `cancel` to stop.*"),
+            color=VIREX_COLOR))
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I couldn't DM you. Please enable **Direct Messages** from server members "
+            "(Privacy Settings) and click the button again.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        "📩 Check your **DMs** — I've sent you the verification steps.", ephemeral=True)
+
+    claim_in_progress.add(user.id)
+
+    def check(m: discord.Message) -> bool:
+        return m.author.id == user.id and isinstance(m.channel, discord.DMChannel)
+
+    try:
+        # Step 1 — order id
+        try:
+            msg_order = await bot.wait_for("message", check=check, timeout=CLAIM_DM_TIMEOUT)
+        except asyncio.TimeoutError:
+            await dm.send("⌛ Timed out. Click the button again when you're ready.")
+            return
+        order_id = msg_order.content.strip()
+        if order_id.lower() == "cancel":
+            await dm.send("❌ Cancelled.")
+            return
+
+        # Step 2 — email
+        await dm.send(embed=discord.Embed(
+            title="📧 Step 2/2 — Email",
+            description=("Now reply with the **email address you used for the order**.\n\n"
+                         f"*Type `cancel` to stop.*"),
+            color=VIREX_COLOR))
+        try:
+            msg_email = await bot.wait_for("message", check=check, timeout=CLAIM_DM_TIMEOUT)
+        except asyncio.TimeoutError:
+            await dm.send("⌛ Timed out. Click the button again when you're ready.")
+            return
+        email = msg_email.content.strip()
+        if email.lower() == "cancel":
+            await dm.send("❌ Cancelled.")
+            return
+
+        # Re-fetch member (in case cache is stale) and verify
+        member = guild.get_member(user.id) if guild else None
+        if member is None:
+            await dm.send("❌ I couldn't find you in the server. Please rejoin and try again.")
+            return
+
+        await dm.send("🔎 Verifying your order, one moment...")
+        success, result_msg = await process_claim(member, guild, order_id, email)
+        await dm.send(result_msg)
+
+    except Exception as e:
+        print(f"[CLAIM DM] {type(e).__name__}: {e}")
+        try:
+            await dm.send("❌ Something went wrong. Please try again later or open a ticket.")
+        except discord.HTTPException:
+            pass
+    finally:
+        claim_in_progress.discard(user.id)
+
+
+class ClaimRoleView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim Customer Role", style=discord.ButtonStyle.primary,
+                       emoji="🔑", custom_id="virex_claim_role")
+    async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
+            return
+        await start_claim_dm(interaction)
+
+
+@bot.command(name="claimrole")
+async def cmd_claimrole(ctx: commands.Context):
+    """Post the 'Claim Customer Role' verification panel (staff only)."""
+    if not is_any_staff(ctx.author):
+        await ctx.reply("❌ You don't have permission to use this.", mention_author=False)
+        return
+
+    embed = discord.Embed(
+        title="🔑 Claim Your Customer Role",
+        description=("Press the button below and verify your order via **DM**.\n\n"
+                     "You'll be asked for your **Order ID** and the **email** you ordered with. "
+                     "If they match a completed order that hasn't been claimed yet, you'll "
+                     "instantly receive the customer role."),
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc))
+    set_logo(embed)
+    embed.set_footer(text="Virex • Verification System")
+
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    await ctx.send(embed=embed, view=ClaimRoleView())
+
+
 @bot.event
 async def on_ready():
     global whitelist_cache
@@ -1429,6 +1801,7 @@ async def on_ready():
     bot.add_view(TicketPanelView())
     bot.add_view(TicketControlView())
     bot.add_view(StoreView())
+    bot.add_view(ClaimRoleView())
 
     # Background-Tasks
     if not auto_close_task.is_running():
@@ -1458,6 +1831,13 @@ async def on_ready():
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
+        return
+
+    # ── DMs: skip guild-only moderation (word filter, silent prefix, ticket
+    #    activity). The claim-role flow collects order id / email here via
+    #    wait_for, which fires independently of this handler.
+    if message.guild is None:
+        await bot.process_commands(message)
         return
 
     # ── Silent prefix "*" — sendet als Bot (nur Staff!) ──────────────────────
@@ -2816,6 +3196,9 @@ async def main():
     async with bot:
         await bot.start(TOKEN)
 
+
+if __name__ == "__main__":
+    asyncio.run(main())
 
 if __name__ == "__main__":
     asyncio.run(main())
