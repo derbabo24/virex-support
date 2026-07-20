@@ -428,6 +428,39 @@ def get_ticket_category_channel(guild: discord.Guild, cat_key: str):
     ch = guild.get_channel(int(chosen))
     return ch if isinstance(ch, discord.CategoryChannel) else None
 
+
+def sanitize_channel_name(name: str) -> str:
+    """Wandelt einen Discord-Anzeigenamen/Username in einen gültigen,
+    URL-sicheren Kanalnamen um (klein geschrieben, nur a-z/0-9/-)."""
+    name = name.strip().lower()
+    # Umlaute grob transliterieren, damit Namen wie "Björn" nicht komplett wegfallen
+    replacements = {
+        "ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss",
+        "á": "a", "à": "a", "â": "a", "é": "e", "è": "e",
+        "ê": "e", "í": "i", "î": "i", "ó": "o", "ô": "o",
+        "ú": "u", "û": "u", "ñ": "n",
+    }
+    for src, dst in replacements.items():
+        name = name.replace(src, dst)
+    name = re.sub(r"[^a-z0-9]+", "-", name)
+    name = re.sub(r"-+", "-", name).strip("-")
+    if not name:
+        name = "user"
+    return name[:80]  # Discord-Limit ist 100 Zeichen, Platz für "ticket-"-Präfix lassen
+
+
+def make_unique_ticket_channel_name(guild: discord.Guild, base_name: str) -> str:
+    """Hängt bei Namenskollisionen (z.B. zwei User mit gleichem Anzeigenamen)
+    eine laufende Nummer an, damit der Kanalname eindeutig bleibt."""
+    existing = {c.name for c in guild.text_channels}
+    channel_name = f"ticket-{base_name}"
+    if channel_name not in existing:
+        return channel_name
+    suffix = 2
+    while f"{channel_name}-{suffix}" in existing:
+        suffix += 1
+    return f"{channel_name}-{suffix}"
+
 # ============================================================
 #  VERIFIED USERS — DB HELPERS
 # ============================================================
@@ -1047,11 +1080,14 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str,
                                                            read_message_history=True)
 
     parent = get_ticket_category_channel(guild, cat_key)
-    num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+    # Kanalname jetzt aus dem Discord-Usernamen statt einer laufenden Nummer.
+    ticket_num    = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+    base_name     = sanitize_channel_name(interaction.user.name)
+    channel_name  = make_unique_ticket_channel_name(guild, base_name)
 
     try:
         channel = await guild.create_text_channel(
-            name=f"ticket-{num:04d}", overwrites=overwrites, category=parent,
+            name=channel_name, overwrites=overwrites, category=parent,
             topic=f"uid-{interaction.user.id} | {cat_key} | open")
     except discord.HTTPException as e:
         await interaction.followup.send(f"❌ Could not create ticket: {e}", ephemeral=True)
@@ -1066,7 +1102,7 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str,
     await interaction.followup.send(f"✅ Ticket created: {channel.mention}", ephemeral=True)
 
     embed = discord.Embed(
-        title=f"{cat['emoji']} {cat['label']} — Ticket #{num:04d}",
+        title=f"{cat['emoji']} {cat['label']} — Ticket #{ticket_num:04d}",
         description=(
             "Thank you for creating a support ticket. While you wait for a support "
             "agent to promptly assist you in your inquiry, please review the "
@@ -1602,10 +1638,12 @@ async def on_interaction(interaction: discord.Interaction):
             overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
 
     cat_channel = guild.get_channel(TICKET_CATEGORY_ID)
-    num = len([c for c in guild.text_channels if c.name.startswith("ticket-")]) + 1
+    # Kanalname jetzt aus dem Discord-Usernamen statt einer laufenden Nummer.
+    base_name    = sanitize_channel_name(interaction.user.name)
+    channel_name = make_unique_ticket_channel_name(guild, base_name)
     try:
         ch = await guild.create_text_channel(
-            name=f"ticket-{num:04d}", overwrites=overwrites, category=cat_channel,
+            name=channel_name, overwrites=overwrites, category=cat_channel,
             topic=f"uid-{interaction.user.id} | support | open"
         )
     except Exception as e:
