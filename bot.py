@@ -281,12 +281,19 @@ async def init_db() -> bool:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS staff_points (
                     user_id       BIGINT PRIMARY KEY,
-                    guild_id      BIGINT NOT NULL,
+                    guild_id      BIGINT NOT NULL DEFAULT 0,
                     points        BIGINT NOT NULL DEFAULT 0,
                     message_count BIGINT NOT NULL DEFAULT 0,
                     updated_at    TIMESTAMPTZ DEFAULT NOW()
                 )
             ''')
+            # Safety net: if staff_points already existed from an earlier
+            # deploy with a different/older schema, backfill any missing
+            # columns instead of erroring out on every message.
+            await conn.execute('ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS guild_id BIGINT NOT NULL DEFAULT 0')
+            await conn.execute('ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS points BIGINT NOT NULL DEFAULT 0')
+            await conn.execute('ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS message_count BIGINT NOT NULL DEFAULT 0')
+            await conn.execute("ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
         print("✅ Database ready (blacklist, whitelist, verified_users, tickets, claimed_orders, staff_points)")
         return True
     except Exception as e:
@@ -1853,11 +1860,24 @@ async def on_ready():
         print("🔄 Token refresh loop started (runs every 6h)")
 
     # Slash-Commands syncen
+    # Global sync (propagates to Discord within up to ~1h, but is what
+    # actually clears out renamed/removed commands like the old /r6guide).
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s)")
+        print(f"✅ Synced {len(synced)} slash command(s) globally (may take up to 1h to update everywhere)")
     except Exception as e:
-        print(f"❌ Failed to sync commands: {e}")
+        print(f"❌ Failed to sync commands globally: {e}")
+
+    # Guild-specific sync — appears INSTANTLY in your server, so you don't
+    # have to wait for the global propagation above while testing.
+    if GUILD_ID:
+        try:
+            guild_obj = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild_obj)
+            guild_synced = await bot.tree.sync(guild=guild_obj)
+            print(f"✅ Synced {len(guild_synced)} slash command(s) instantly to guild {GUILD_ID}")
+        except Exception as e:
+            print(f"❌ Failed to sync commands to guild {GUILD_ID}: {e}")
 
     # Flask nur einmal starten
     if not hasattr(bot, 'flask_started'):
@@ -3317,3 +3337,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
