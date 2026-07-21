@@ -47,6 +47,8 @@ BAN_REQUEST_CHANNEL_ID = int(os.environ.get("BAN_REQUEST_CHANNEL_ID", 0))
 ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Blacklist")  # darf Ban-Requests approven/denyen
 STAFF_ROLE_NAME = "Trial Staff (not trusted)"
 BLACKLIST_ADMIN_ROLE = "Blacklist"
+# Points a Trial Staff member earns per message sent in the server (used by /leaderboard)
+POINTS_PER_MESSAGE = int(os.environ.get("POINTS_PER_MESSAGE", 1) or 1)
 APPROVE_CHANNEL_ID = 1504531328731709540
 POST_CHANNEL_ID = 1502194708993146921
 CHANGELOG_CHANNEL_ID = 1524959757499371620
@@ -275,7 +277,17 @@ async def init_db() -> bool:
                     claimed_at  TIMESTAMPTZ DEFAULT NOW()
                 )
             ''')
-        print("✅ Database ready (blacklist, whitelist, verified_users, tickets, claimed_orders)")
+            # ── Staff leaderboard table (/leaderboard) ──────────────────────
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS staff_points (
+                    user_id       BIGINT PRIMARY KEY,
+                    guild_id      BIGINT NOT NULL,
+                    points        BIGINT NOT NULL DEFAULT 0,
+                    message_count BIGINT NOT NULL DEFAULT 0,
+                    updated_at    TIMESTAMPTZ DEFAULT NOW()
+                )
+            ''')
+        print("✅ Database ready (blacklist, whitelist, verified_users, tickets, claimed_orders, staff_points)")
         return True
     except Exception as e:
         print(f"❌ Database error: {e}")
@@ -704,6 +716,35 @@ async def db_all_tickets() -> dict:
 #  (Mod-Bot arbeitet mit Rollen-NAMEN, Ticket-Bot mit Rollen-IDs —
 #   beides bleibt erhalten, is_any_staff prüft beides.)
 # ============================================================
+async def db_add_staff_points(user_id: int, guild_id: int, points: int) -> None:
+    """Adds `points` to a user's leaderboard total (creates the row if needed)."""
+    if not db_pool:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO staff_points (user_id, guild_id, points, message_count, updated_at)
+            VALUES ($1, $2, $3, 1, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                points        = staff_points.points + EXCLUDED.points,
+                message_count = staff_points.message_count + 1,
+                guild_id      = EXCLUDED.guild_id,
+                updated_at    = NOW()
+        """, user_id, guild_id, points)
+
+
+async def db_get_leaderboard(guild_id: int, limit: int = 10) -> list:
+    if not db_pool:
+        return []
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT user_id, points, message_count FROM staff_points
+            WHERE guild_id = $1
+            ORDER BY points DESC
+            LIMIT $2
+        """, guild_id, limit)
+    return [dict(r) for r in rows]
+
+
 def has_staff_role(user: discord.Member) -> bool:
     return STAFF_ROLE_NAME.lower() in [r.name.lower() for r in getattr(user, "roles", [])]
 
@@ -1887,6 +1928,13 @@ async def on_message(message: discord.Message):
             await log_deleted_message(message, matched)
             return
 
+    # ── Staff-Leaderboard: Punkte für Trial Staff (not trusted) sammeln ──────
+    if db_pool and has_staff_role(message.author):
+        try:
+            await db_add_staff_points(message.author.id, message.guild.id, POINTS_PER_MESSAGE)
+        except Exception as e:
+            print(f"[LEADERBOARD] {e}")
+
     # ── Ticket last_activity aktualisieren ───────────────────────────────────
     if db_pool:
         try:
@@ -2105,7 +2153,8 @@ async def commands_list(ctx):
             "`/whitelist @user` — Whitelist a user (bypasses word filter)\n"
             "`/unwhitelist @user` — Remove whitelist from a user\n"
             "`/whitelistview` — Show all whitelisted users\n"
-            "`/r6guide` — Vega R6 setup guide"
+            "`/guide` — Vega R6 setup guide\n"
+            f"`/leaderboard` — {STAFF_ROLE_NAME} activity leaderboard ({STAFF_ROLE_NAME} only)"
         ),
         inline=False
     )
@@ -2117,6 +2166,7 @@ async def commands_list(ctx):
             "`/close` — Close the current ticket (Staff)\n"
             "`/add <user>` — Add a user to the ticket (Staff)\n"
             "`/remove <user>` — Remove a user from the ticket (Staff)\n"
+            "`/rename <name>` — Rename the current ticket (Staff)\n"
             "`/autoclose <enabled>` — Toggle auto-close (Staff)\n"
             "`/smedia` — Media Creator announcement (Admin)\n"
             "`/verifypanel` — Send the verification panel (Admin)\n"
@@ -2496,8 +2546,43 @@ async def changelog(interaction: discord.Interaction, game: str, update: str):
     await interaction.response.send_message(f"✅ Changelog for **{game}** has been posted!", ephemeral=True)
 
 
-@bot.tree.command(name="r6guide", description="Shows the Vega R6 setup guide")
-async def r6guide(interaction: discord.Interaction):
+@bot.tree.command(name="leaderboard", description=f"Show the {STAFF_ROLE_NAME} activity leaderboard ({STAFF_ROLE_NAME} only)")
+async def leaderboard(interaction: discord.Interaction):
+    if not has_staff_role(interaction.user):
+        await interaction.response.send_message(
+            f"❌ You need the **{STAFF_ROLE_NAME}** role to use this command.", ephemeral=True)
+        return
+    if not db_pool:
+        await interaction.response.send_message("❌ Database not available right now.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+    rows = await db_get_leaderboard(interaction.guild.id, limit=10)
+
+    embed = discord.Embed(
+        title=f"🏆 {STAFF_ROLE_NAME} — Leaderboard",
+        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+    )
+    set_logo(embed)
+
+    if not rows:
+        embed.description = "No activity has been tracked yet."
+    else:
+        medals = ["🥇", "🥈", "🥉"]
+        lines = []
+        for i, row in enumerate(rows):
+            member = interaction.guild.get_member(row["user_id"])
+            name   = member.mention if member else f"<@{row['user_id']}>"
+            rank   = medals[i] if i < len(medals) else f"`#{i + 1}`"
+            lines.append(f"{rank} {name} — **{row['points']}** pts ({row['message_count']} messages)")
+        embed.description = "\n".join(lines)
+
+    embed.set_footer(text=f"{POINTS_PER_MESSAGE} point(s) per message • Virex Team")
+    await interaction.followup.send(embed=embed)
+
+
+@bot.tree.command(name="guide", description="Shows the Vega R6 setup guide")
+async def guide(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📖 Vega R6 — Setup Guide",
         description=f"**[🔗 Click here to open the full guide]({R6_GUIDE_URL})**",
@@ -2862,6 +2947,39 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
         embed=discord.Embed(description=f"✅ {user.mention} removed.", color=VIREX_COLOR_DANGER))
 
 
+@bot.tree.command(name="rename", description="Rename the current ticket (Staff only)")
+@app_commands.describe(name="New name for this ticket, e.g. 'john' -> ticket-john")
+@app_commands.guild_only()
+async def cmd_rename(interaction: discord.Interaction, name: str):
+    if not is_staff(interaction.user):
+        await interaction.response.send_message("❌ Staff only.", ephemeral=True)
+        return
+    info = await db_get_ticket(str(interaction.channel.id))
+    if not info:
+        await interaction.response.send_message("❌ Not a ticket channel.", ephemeral=True)
+        return
+
+    base_name = sanitize_channel_name(name)
+    new_name  = f"ticket-{base_name}"
+    existing  = {c.name for c in interaction.guild.text_channels if c.id != interaction.channel.id}
+    if new_name in existing:
+        suffix = 2
+        while f"{new_name}-{suffix}" in existing:
+            suffix += 1
+        new_name = f"{new_name}-{suffix}"
+
+    old_name = interaction.channel.name
+    try:
+        await interaction.channel.edit(name=new_name, reason=f"Renamed by {interaction.user}")
+    except discord.HTTPException as e:
+        await interaction.response.send_message(f"❌ Could not rename channel: {e}", ephemeral=True)
+        return
+
+    await interaction.response.send_message(embed=discord.Embed(
+        description=f"✏️ Ticket renamed from `{old_name}` to `{new_name}` by {interaction.user.mention}.",
+        color=VIREX_COLOR))
+
+
 @bot.tree.command(name="autoclose", description="Enable or disable auto-close for this ticket (Staff only)")
 @app_commands.describe(enabled="True = on  |  False = off")
 @app_commands.guild_only()
@@ -3196,9 +3314,6 @@ async def main():
     async with bot:
         await bot.start(TOKEN)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
 
 if __name__ == "__main__":
     asyncio.run(main())
