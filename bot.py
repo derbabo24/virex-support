@@ -13,8 +13,9 @@
 #    zu jeweils EINEM Handler zusammengefasst.
 #  • init_db legt jetzt ALLE 4 Tabellen an
 #    (blacklist, whitelist, verified_users, tickets).
-#  • Der "*"-Silent-Prefix verlangt jetzt Staff (aus dem Mod-Bot),
-#    da der Ticket-Bot ihn ungeschützt hatte.
+#  • Der "*"-Silent-Prefix ist jetzt eine strikte Allowlist:
+#    NUR User, denen der Owner ihn per /perms give erlaubt hat.
+#    Staff/Admins bekommen ihn NICHT automatisch.
 #  • Staff = Rollenname (Mod-Bot) ODER Rollen-ID (Ticket-Bot).
 # ============================================================
 
@@ -1988,10 +1989,11 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # ── Silent prefix "*" — sends as the bot (Staff OR users granted via
-    #    /perms give). Everyone else is silently ignored. ──────────────────────
+    # ── Silent prefix "*" — sends as the bot. STRICT allowlist: ONLY users
+    #    granted via /perms give. Staff and admins do NOT get it automatically.
+    #    Everyone else is silently ignored. ─────────────────────────────────────
     if message.content.startswith(SILENT_PREFIX):
-        if not (is_any_staff(message.author) or message.author.id in silent_perm_cache):
+        if message.author.id not in silent_perm_cache:
             return
         content = message.content[len(SILENT_PREFIX):].strip()
         try:
@@ -2920,7 +2922,7 @@ async def perms_see(interaction: discord.Interaction):
         embed = discord.Embed(
             title="📋 Silent Prefix Permissions",
             description="No users are currently allowed to use the `*` silent prefix.\n"
-                        "*(Staff can always use it.)*",
+                        "*Nobody can use it right now — not even staff.*",
             color=0x57F287,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -2944,7 +2946,7 @@ async def perms_see(interaction: discord.Interaction):
         description="\n".join(lines),
         color=0x57F287,
     )
-    embed.set_footer(text="These users can use *hello • Staff can always use it • Virex Team")
+    embed.set_footer(text="Only these users can use *hello • Virex Team")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
