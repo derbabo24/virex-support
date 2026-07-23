@@ -125,21 +125,12 @@ claim_in_progress: set[int] = set()
 
 # ─── PRODUCT STATUS ───────────────────────────────────────────────────────────
 product_status: dict[str, str] = {
-    "Lethal Lite":       "Testing",
-    "Lethal FULL":       "Testing",
-    "CRUSADER":          "Undetected",
-    "Bo6 External":      "Undetected",
-    "BO7/WZ Fade Chair": "Undetected",
-    "ANCIENT R6s":       "Testing",
-    "Vega R6":           "Online",
-    "ONYX FN":           "Updating",
-    "ONYX APEX":         "Updating",
-    "FECURITY Apex":     "Online",
-    "MEMEZ RUST":        "Online",
-    "MEMEZ Lite":        "Online",
-    "MEMEZ FULL":        "Online",
-    "PREDATOR":          "Online",
-    "ONYX SPOOFER":      "Online",
+    "Vega R6":           "Updating",
+    "ONYX FN":           "Undetected",
+    "Temp Spoofer":      "Undetected",
+    "Perm SPOOFER":      "Undetected",
+    "Valorant Full":     "Undetected",
+    "Fn Accounts":       "Online",
 }
 STATUS_DOTS = {
     "Undetected": "🟢",
