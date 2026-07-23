@@ -43,6 +43,9 @@ load_dotenv()
 # ============================================================
 PREFIX = "$"
 SILENT_PREFIX = "*"
+# Bot owner(s) — only these users may manage silent-prefix permissions (/perms).
+# Set OWNER_ID in Railway. Multiple IDs can be comma-separated: "123,456"
+OWNER_IDS = [int(x) for x in os.environ.get("OWNER_ID", "").replace(" ", "").split(",") if x.isdigit()]
 BAN_REQUEST_CHANNEL_ID = int(os.environ.get("BAN_REQUEST_CHANNEL_ID", 0))
 ADMIN_ROLE_NAME = os.environ.get("ADMIN_ROLE_NAME", "Blacklist")  # darf Ban-Requests approven/denyen
 STAFF_ROLE_NAME = "Trial Staff (not trusted)"
@@ -172,6 +175,7 @@ vouch_counter: int = 1
 active_giveaways: dict = {}
 db_pool: asyncpg.Pool = None
 whitelist_cache: set[int] = set()   # Wortfilter-Bypass, aus DB geladen
+silent_perm_cache: set[int] = set() # Users allowed to use the "*" silent prefix (from DB)
 
 # ============================================================
 #  BOT SETUP  (nur EIN Bot-Objekt — akzeptiert "$" und "!")
@@ -240,6 +244,15 @@ async def init_db() -> bool:
                     guild_id BIGINT NOT NULL
                 )
             ''')
+            # ── Silent-prefix permissions (who may use "*hello") ────────────
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS silent_perms (
+                    user_id BIGINT PRIMARY KEY,
+                    granted_by BIGINT NOT NULL,
+                    granted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                    guild_id BIGINT NOT NULL
+                )
+            ''')
             # ── Ticket / Verify tables ──────────────────────────────────────
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS verified_users (
@@ -294,7 +307,7 @@ async def init_db() -> bool:
             await conn.execute('ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS points BIGINT NOT NULL DEFAULT 0')
             await conn.execute('ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS message_count BIGINT NOT NULL DEFAULT 0')
             await conn.execute("ALTER TABLE staff_points ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()")
-        print("✅ Database ready (blacklist, whitelist, verified_users, tickets, claimed_orders, staff_points)")
+        print("✅ Database ready (blacklist, whitelist, silent_perms, verified_users, tickets, claimed_orders, staff_points)")
         return True
     except Exception as e:
         print(f"❌ Database error: {e}")
@@ -427,6 +440,66 @@ async def db_get_whitelist(guild_id: int) -> list:
     except Exception as e:
         print(f"❌ Error fetching whitelist: {e}")
         return []
+
+# ── Silent-prefix permission DB helpers ───────────────────────────────────────
+async def db_add_silent_perm(user_id: int, granted_by: int, guild_id: int) -> bool:
+    """Grant a user permission to use the "*" silent prefix."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO silent_perms (user_id, granted_by, guild_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO NOTHING
+            ''', user_id, granted_by, guild_id)
+        silent_perm_cache.add(user_id)
+        return True
+    except Exception as e:
+        print(f"❌ Error adding silent perm: {e}")
+        return False
+
+
+async def db_remove_silent_perm(user_id: int) -> bool:
+    """Revoke a user's permission to use the "*" silent prefix."""
+    if not db_pool:
+        return False
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('DELETE FROM silent_perms WHERE user_id = $1', user_id)
+        silent_perm_cache.discard(user_id)
+        return True
+    except Exception as e:
+        print(f"❌ Error removing silent perm: {e}")
+        return False
+
+
+async def db_load_silent_perms() -> set[int]:
+    """Load all silent-prefix-permitted user IDs into the cache on startup."""
+    if not db_pool:
+        return set()
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch('SELECT user_id FROM silent_perms')
+        return {r['user_id'] for r in rows}
+    except Exception as e:
+        print(f"❌ Error loading silent perms: {e}")
+        return set()
+
+
+async def db_get_silent_perms(guild_id: int) -> list:
+    if not db_pool:
+        return []
+    try:
+        async with db_pool.acquire() as conn:
+            return await conn.fetch(
+                'SELECT user_id, granted_by, granted_at FROM silent_perms WHERE guild_id = $1 ORDER BY granted_at DESC',
+                guild_id
+            )
+    except Exception as e:
+        print(f"❌ Error fetching silent perms: {e}")
+        return []
+
 
 # ── Claimed-orders DB helpers ─────────────────────────────────────────────────
 async def db_get_claim(order_key: str) -> dict | None:
@@ -792,6 +865,11 @@ def is_any_staff(member) -> bool:
     if not isinstance(member, discord.Member):
         return False
     return has_staff_role(member) or is_staff(member)
+
+
+def is_bot_owner(user) -> bool:
+    """Only the owner ID(s) set via the Railway OWNER_ID variable."""
+    return getattr(user, "id", None) in OWNER_IDS
 
 # ============================================================
 #  EMBED / FILTER HELPERS
@@ -1835,7 +1913,7 @@ async def cmd_claimrole(ctx: commands.Context):
 
 @bot.event
 async def on_ready():
-    global whitelist_cache
+    global whitelist_cache, silent_perm_cache
     print(f"✅ Virex Bot online — {bot.user}")
 
     await bot.change_presence(activity=discord.Game(name="virex.gg | $commands"))
@@ -1843,6 +1921,15 @@ async def on_ready():
     # Whitelist-Cache laden (Moderation)
     whitelist_cache = await db_load_whitelist()
     print(f"✅ Whitelist cache loaded: {len(whitelist_cache)} user(s)")
+
+    # Silent-prefix permission cache laden
+    silent_perm_cache = await db_load_silent_perms()
+    print(f"✅ Silent-prefix perm cache loaded: {len(silent_perm_cache)} user(s)")
+
+    if OWNER_IDS:
+        print(f"✅ Owner ID(s) configured: {', '.join(str(i) for i in OWNER_IDS)}")
+    else:
+        print("⚠️  OWNER_ID not set — nobody can use /perms! Add OWNER_ID in Railway.")
 
     # Persistente Views (überleben Neustarts)
     bot.add_view(BanRequestView())
@@ -1901,9 +1988,10 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # ── Silent prefix "*" — sendet als Bot (nur Staff!) ──────────────────────
+    # ── Silent prefix "*" — sends as the bot (Staff OR users granted via
+    #    /perms give). Everyone else is silently ignored. ──────────────────────
     if message.content.startswith(SILENT_PREFIX):
-        if not is_any_staff(message.author):
+        if not (is_any_staff(message.author) or message.author.id in silent_perm_cache):
             return
         content = message.content[len(SILENT_PREFIX):].strip()
         try:
@@ -2748,6 +2836,120 @@ async def cmd_whitelistview(interaction: discord.Interaction):
     embed.set_footer(text="These users bypass the word filter • Virex Team")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ─── SILENT-PREFIX PERMISSIONS (/perms give | take | see) — OWNER ONLY ────────
+OWNER_ONLY_MSG = "❌ Only the bot owner can use this command."
+
+perms_group = app_commands.Group(
+    name="perms",
+    description="Manage who may use the * silent prefix (e.g. *hello) — Owner only",
+)
+
+
+@perms_group.command(name="give", description="Allow a user to use the * silent prefix (Owner only)")
+@app_commands.describe(member="The user to grant silent-prefix permission")
+async def perms_give(interaction: discord.Interaction, member: discord.Member):
+    if not is_bot_owner(interaction.user):
+        await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
+        return
+    if member.id in silent_perm_cache:
+        embed = discord.Embed(
+            title="⚠️ Already Allowed",
+            description=f"{member.mention} can already use the `*` silent prefix.",
+            color=0xF39C12,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    success = await db_add_silent_perm(member.id, interaction.user.id, interaction.guild.id)
+    if success:
+        embed = discord.Embed(
+            title="✅ Silent Prefix Granted",
+            description=f"{member.mention} can now use the `*` silent prefix (e.g. `*hello`).",
+            color=0x57F287,
+        )
+        embed.add_field(name="👤 User",      value=f"{member} (`{member.id}`)", inline=True)
+        embed.add_field(name="🛡️ Granted By", value=f"{interaction.user}",       inline=True)
+        embed.add_field(name="⏰ Timestamp", value=utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="Virex — Silent Prefix Permissions")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Database error. Failed to grant permission.", ephemeral=True
+        )
+
+
+@perms_group.command(name="take", description="Remove a user's permission to use the * silent prefix (Owner only)")
+@app_commands.describe(member="The user to revoke silent-prefix permission from")
+async def perms_take(interaction: discord.Interaction, member: discord.Member):
+    if not is_bot_owner(interaction.user):
+        await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
+        return
+    if member.id not in silent_perm_cache:
+        embed = discord.Embed(
+            title="⚠️ Not Allowed",
+            description=f"{member.mention} did not have silent-prefix permission.",
+            color=0xF39C12,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    success = await db_remove_silent_perm(member.id)
+    if success:
+        embed = discord.Embed(
+            title="🚫 Silent Prefix Revoked",
+            description=f"{member.mention} can no longer use the `*` silent prefix.",
+            color=0xE74C3C,
+        )
+        embed.add_field(name="👤 User",       value=f"{member} (`{member.id}`)", inline=True)
+        embed.add_field(name="🛡️ Revoked By", value=f"{interaction.user}",       inline=True)
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.set_footer(text="Virex — Silent Prefix Permissions")
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(
+            "❌ Database error. Failed to revoke permission.", ephemeral=True
+        )
+
+
+@perms_group.command(name="see", description="Show all users allowed to use the * silent prefix (Owner only)")
+async def perms_see(interaction: discord.Interaction):
+    if not is_bot_owner(interaction.user):
+        await interaction.response.send_message(OWNER_ONLY_MSG, ephemeral=True)
+        return
+    records = await db_get_silent_perms(interaction.guild.id)
+    if not records:
+        embed = discord.Embed(
+            title="📋 Silent Prefix Permissions",
+            description="No users are currently allowed to use the `*` silent prefix.\n"
+                        "*(Staff can always use it.)*",
+            color=0x57F287,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    lines = []
+    for record in records:
+        try:
+            user = await bot.fetch_user(record['user_id'])
+            user_display = f"{user.mention}"
+        except Exception:
+            user_display = "Unknown"
+        try:
+            staff = await bot.fetch_user(record['granted_by'])
+            staff_display = str(staff)
+        except Exception:
+            staff_display = "Unknown"
+        ts = record['granted_at'].strftime("%d.%m.%Y %H:%M")
+        lines.append(f"• {user_display} (`{record['user_id']}`) — granted by **{staff_display}** on {ts}")
+    embed = discord.Embed(
+        title=f"📋 Silent Prefix Permissions — {len(records)} user(s)",
+        description="\n".join(lines),
+        color=0x57F287,
+    )
+    embed.set_footer(text="These users can use *hello • Staff can always use it • Virex Team")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+bot.tree.add_command(perms_group)
+
 # ─── VOUCH COMMAND ────────────────────────────────────────────────────────────
 @bot.tree.command(name="vouch", description="Leave a vouch for Virex (customers only)")
 @app_commands.describe(stars="Your rating (1–5 stars)", message="Your vouch message")
@@ -3337,4 +3539,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
