@@ -105,6 +105,15 @@ TICKET_PANEL_BANNER = os.getenv("TICKET_PANEL_BANNER", "").strip()
 TICKET_OPEN_BANNER  = os.getenv("TICKET_OPEN_BANNER", "").strip()
 
 # ============================================================
+#  CONFIG — SUGGESTIONS
+# ============================================================
+# Railway-Variablen:
+#   SUGGESTION_CHANNEL_ID = Channel-ID, in dem die Suggestions landen
+#   SUGGESTION_BANNER     = Bild-URL für das "Community Suggestions"-Panel
+SUGGESTION_CHANNEL_ID = int(os.getenv("SUGGESTION_CHANNEL_ID", 0))
+SUGGESTION_BANNER     = os.getenv("SUGGESTION_BANNER", "").strip()
+
+# ============================================================
 #  CONFIG — CLAIM ROLE / SELLAUTH
 # ============================================================
 # API key:  SellAuth Dashboard → Account → API Access
@@ -1903,6 +1912,96 @@ async def cmd_claimrole(ctx: commands.Context):
     await ctx.send(embed=embed, view=ClaimRoleView())
 
 
+# ============================================================
+#  SUGGESTIONS — Panel, Modal & Command
+# ============================================================
+class SuggestionModal(discord.ui.Modal):
+    def __init__(self):
+        super().__init__(title="Submit a Suggestion")
+        self.suggestion = discord.ui.TextInput(
+            label="Your suggestion",
+            style=discord.TextStyle.paragraph,
+            placeholder="Describe your idea or feedback...",
+            required=True, max_length=1000)
+        self.add_item(self.suggestion)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        channel = bot.get_channel(SUGGESTION_CHANNEL_ID)
+        if channel is None:
+            await interaction.response.send_message(
+                "❌ Suggestion channel is not configured. Set `SUGGESTION_CHANNEL_ID` in Railway.",
+                ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="💡 New Suggestion",
+            description=self.suggestion.value.strip(),
+            color=VIREX_COLOR,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_author(
+            name=str(interaction.user),
+            icon_url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"User ID: {interaction.user.id} • Virex Suggestions")
+
+        try:
+            msg = await channel.send(embed=embed)
+            await msg.add_reaction("👍")
+            await msg.add_reaction("👎")
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "❌ I don't have permission to post in the suggestion channel.", ephemeral=True)
+            return
+        except discord.HTTPException as e:
+            await interaction.response.send_message(
+                f"❌ Could not submit your suggestion: {e}", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "✅ Your suggestion has been submitted! Thanks for helping us improve Virex.",
+            ephemeral=True)
+
+
+class SuggestionPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Submit Suggestion", style=discord.ButtonStyle.primary,
+                       custom_id="virex_submit_suggestion")
+    async def submit_suggestion(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SuggestionModal())
+
+
+@bot.command(name="suggestions")
+async def suggestions_panel(ctx):
+    """Postet das Community-Suggestions-Panel (Staff only)."""
+    if not await staff_check(ctx):
+        return
+    try:
+        await ctx.message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    embed = discord.Embed(
+        title="Community Suggestions",
+        description=(
+            "Help us improve Virex by submitting your ideas and feedback.\n\n"
+            "Suggestions that are **approved and implemented** may be rewarded "
+            "with **Keys or other bonuses** at the team's discretion.\n\n"
+            "Click the button below to submit your suggestion."
+        ),
+        color=VIREX_COLOR
+    )
+    if SUGGESTION_BANNER:
+        embed.set_image(url=SUGGESTION_BANNER)
+    if VIREX_LOGO:
+        embed.set_footer(text="Virex", icon_url=VIREX_LOGO)
+    else:
+        embed.set_footer(text="Virex")
+
+    await ctx.send(embed=embed, view=SuggestionPanelView())
+
+
 @bot.event
 async def on_ready():
     global whitelist_cache, silent_perm_cache
@@ -1929,6 +2028,7 @@ async def on_ready():
     bot.add_view(TicketControlView())
     bot.add_view(StoreView())
     bot.add_view(ClaimRoleView())
+    bot.add_view(SuggestionPanelView())
 
     # Background-Tasks
     if not auto_close_task.is_running():
@@ -2232,7 +2332,8 @@ async def commands_list(ctx):
             "`$proof` — Purchase proof instructions\n"
             "`$ban <user_id> <reason>` — Send a ban request (admins approve/deny)\n"
             "`$scam` — Post a scam warning (@everyone)\n"
-            "`$anydesk` — AnyDesk setup guide\n\n"
+            "`$anydesk` — AnyDesk setup guide\n"
+            "`$suggestions` — Post the Community Suggestions panel\n\n"
             "**🔒 Blacklist Commands (Admin only):**\n"
             "`$blacklist <user_id> <reason>` — Add user to blacklist\n"
             "`$unblacklist <user_id>` — Remove user from blacklist\n"
