@@ -1,5 +1,5 @@
 # ============================================================
-#  VIREX BOT — COMBINED (Moderation + Tickets/Verify/Backup)
+#  XENIX BOT — COMBINED (Moderation + Tickets/Verify/Backup)
 #  ----------------------------------------------------------
 #  Zusammengeführt aus:
 #    1) Moderation-Bot  ($-Prefix: blacklist, whitelist, giveaways,
@@ -59,7 +59,7 @@ CHANGELOG_CHANNEL_ID = 1524959757499371620
 CUSTOMER_ROLE_NAME = "customer"
 MESSAGE_LOG_CHANNEL_ID = 1524959786871820309
 VOUCH_CHANNEL_ID = 1524959744228331520
-R6_GUIDE_URL = "https://virexguide.com/"
+R6_GUIDE_URL = "https://xenixguide.com/"
 
 # ============================================================
 #  CONFIG — TICKETS / VERIFY / BACKUP
@@ -71,15 +71,15 @@ TRANSCRIPT_CHANNEL_ID    = int(os.getenv("TRANSCRIPT_CHANNEL_ID", 0))
 STAFF_ROLE_IDS           = [int(x) for x in os.getenv("STAFF_ROLE_IDS", "").split(",") if x.strip().isdigit()]
 ADMIN_ROLE_IDS           = [int(x) for x in os.getenv("ADMIN_ROLE_IDS", "").split(",") if x.strip().isdigit()]
 AUTO_CLOSE_HOURS         = int(os.getenv("AUTO_CLOSE_HOURS", 24))
-VIREX_LOGO               = os.getenv("VIREX_LOGO", "").strip()
-VIREX_WEBSITE            = os.getenv("VIREX_WEBSITE", "https://virex.gg/")
+XENIX_LOGO               = os.getenv("XENIX_LOGO", "").strip()
+XENIX_WEBSITE            = os.getenv("XENIX_WEBSITE", "https://xenix.gg/")
 
-# Unified color palette based on VX logo (deep navy + electric blue)
-VIREX_COLOR              = 0x1A6FFF   # Electric blue — primary accent
-VIREX_COLOR_SUCCESS      = 0x1AE8A0   # Teal-green for success
-VIREX_COLOR_DANGER       = 0xE83A3A   # Soft red for errors/leave
-VIREX_COLOR_WARN         = 0xF0A500   # Amber for warnings/on-hold
-VIREX_COLOR_SUBTLE       = 0x1C2B50   # Dark navy for neutral embeds
+# Unified color palette based on XENIX logo (all-purple)
+XENIX_COLOR              = 0x8B2FFF   # Vivid violet — primary accent
+XENIX_COLOR_SUCCESS      = 0xD0A2FF   # Light lavender for success
+XENIX_COLOR_DANGER       = 0x5B0FA8   # Deep purple for errors/leave
+XENIX_COLOR_WARN         = 0xB35CFF   # Orchid for warnings/on-hold
+XENIX_COLOR_SUBTLE       = 0x2B1B4F   # Dark purple for neutral embeds
 
 # OAuth2 / Verify
 CLIENT_ID                = os.getenv("DISCORD_CLIENT_ID", "")
@@ -94,11 +94,11 @@ WELCOME_CHANNEL_ID       = int(os.getenv("WELCOME_CHANNEL_ID", 0))
 DATABASE_URL             = os.environ.get("DATABASE_URL", "")
 
 TICKET_CATEGORIES = {
-    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",      "emoji": "🛒", "color": VIREX_COLOR,         "category_env": "TICKET_CAT_PURCHASE"},
-    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Virex's Reseller Program.", "emoji": "💰", "color": 0xF0A500,            "category_env": "TICKET_CAT_RESELLER"},
-    "claim":    {"label": "Claim Role / Key",       "description": "Claim your role or product key.",    "emoji": "🔑", "color": VIREX_COLOR_SUCCESS, "category_env": "TICKET_CAT_CLAIM"},
-    "hwid":     {"label": "HWID Reset",             "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xE07B39,            "category_env": "TICKET_CAT_HWID"},
-    "support":  {"label": "Get Support",            "description": "Request support from our staff.",     "emoji": "🎫", "color": VIREX_COLOR,         "category_env": "TICKET_CAT_SUPPORT"},
+    "purchase": {"label": "Purchase",               "description": "Request help with a purchase.",      "emoji": "🛒", "color": XENIX_COLOR,         "category_env": "TICKET_CAT_PURCHASE"},
+    "reseller": {"label": "Apply to be a Reseller", "description": "Apply to Xenix's Reseller Program.", "emoji": "💰", "color": 0xB35CFF,            "category_env": "TICKET_CAT_RESELLER"},
+    "claim":    {"label": "Claim Role / Key",       "description": "Claim your role or product key.",    "emoji": "🔑", "color": XENIX_COLOR_SUCCESS, "category_env": "TICKET_CAT_CLAIM"},
+    "hwid":     {"label": "HWID Reset",             "description": "Request a reset for your key.",       "emoji": "🔒", "color": 0xB35CFF,            "category_env": "TICKET_CAT_HWID"},
+    "support":  {"label": "Get Support",            "description": "Request support from our staff.",     "emoji": "🎫", "color": XENIX_COLOR,         "category_env": "TICKET_CAT_SUPPORT"},
 }
 
 TICKET_PANEL_BANNER = os.getenv("TICKET_PANEL_BANNER", "").strip()
@@ -150,12 +150,12 @@ STATUS_DOTS = {
     "Offline":    "⚫",
 }
 STATUS_COLORS = {
-    "Undetected": 0x57F287,
-    "Online":     0x57F287,
-    "Updating":   0x5865F2,
-    "Testing":    0xFEE75C,
-    "Detected":   0xED4245,
-    "Offline":    0x95A5A6,
+    "Undetected": 0xD0A2FF,
+    "Online":     0xD0A2FF,
+    "Updating":   0x8B2FFF,
+    "Testing":    0xB35CFF,
+    "Detected":   0x5B0FA8,
+    "Offline":    0x2B1B4F,
 }
 
 # ─── WORD FILTER ──────────────────────────────────────────────────────────────
@@ -570,8 +570,8 @@ def load_json(path):
 
 
 def set_logo(embed: discord.Embed):
-    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
-        embed.set_thumbnail(url=VIREX_LOGO)
+    if XENIX_LOGO and XENIX_LOGO.startswith("https://"):
+        embed.set_thumbnail(url=XENIX_LOGO)
 
 
 def get_ticket_category_channel(guild: discord.Guild, cat_key: str):
@@ -893,13 +893,13 @@ def build_giveaway_embed(prize, winners, host_id, ends_at, entries, requirements
     )
     if requirements:
         description += f"\n\n📋 **Requirements to enter:**\n{requirements}"
-    embed = discord.Embed(title=f"🎉 GIVEAWAY — {prize}", description=description, color=0xFF73FA)
+    embed = discord.Embed(title=f"🎉 GIVEAWAY — {prize}", description=description, color=0xB35CFF)
     embed.set_footer(text=f"Ends on {ends_at.strftime('%d.%m.%Y at %H:%M')} UTC")
     return embed
 
 
 def build_status_embed() -> discord.Embed:
-    embed = discord.Embed(title="📊 Current Product Status", color=0x6f2cff, timestamp=utcnow())
+    embed = discord.Embed(title="📊 Current Product Status", color=0x8B2FFF, timestamp=utcnow())
     items = list(product_status.items())
     col_size = (len(items) + 2) // 3
     for col_idx in range(3):
@@ -927,7 +927,7 @@ async def log_deleted_message(message: discord.Message, matched_word: str):
     log_channel = bot.get_channel(MESSAGE_LOG_CHANNEL_ID)
     if not log_channel:
         return
-    embed = discord.Embed(title="🚫 Message Deleted — Word Filter", color=0xFF4444, timestamp=utcnow())
+    embed = discord.Embed(title="🚫 Message Deleted — Word Filter", color=0x5B0FA8, timestamp=utcnow())
     embed.add_field(name="👤 User", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
     embed.add_field(name="📍 Channel", value=message.channel.mention, inline=True)
     embed.add_field(name="🔍 Matched Word", value=f"`{matched_word}`", inline=True)
@@ -946,7 +946,7 @@ async def staff_check(ctx) -> bool:
         embed = discord.Embed(
             title="❌ No Permission",
             description=f"You need at least the **{STAFF_ROLE_NAME}** role to use this command.",
-            color=0xFF4444
+            color=0x5B0FA8
         )
         await ctx.send(embed=embed, delete_after=5)
         try:
@@ -962,7 +962,7 @@ async def blacklist_admin_check(ctx) -> bool:
         embed = discord.Embed(
             title="❌ No Permission",
             description=f"You need the **{BLACKLIST_ADMIN_ROLE}** role to use this command.",
-            color=0xFF4444
+            color=0x5B0FA8
         )
         await ctx.send(embed=embed, delete_after=5)
         try:
@@ -987,7 +987,7 @@ async def end_giveaway(message_id: int):
     entries = list(data["entries"])
     prize = data["prize"]
     winner_count = min(data["winners"], len(entries))
-    embed = discord.Embed(title=f"🎉 GIVEAWAY ENDED — {prize}", color=0x888888)
+    embed = discord.Embed(title=f"🎉 GIVEAWAY ENDED — {prize}", color=0x2B1B4F)
     if not entries:
         embed.description = "❌ Nobody entered. No winner was drawn."
         await msg.edit(embed=embed, view=None)
@@ -1132,7 +1132,7 @@ def generate_transcript(channel, messages, guild):
                 att += f'<a href="{a.url}" class="att-file" target="_blank">📎 {a.filename}</a>'
         emb = ""
         for e in msg.embeds:
-            ec = f"#{e.color.value:06x}" if e.color else "#1A6FFF"
+            ec = f"#{e.color.value:06x}" if e.color else "#8B2FFF"
             et = f"<div class='et'>{e.title}</div>" if e.title else ""
             ed = f"<div class='ed'>{e.description}</div>" if e.description else ""
             emb += f'<div class="emb" style="border-left-color:{ec}">{et}{ed}</div>'
@@ -1149,26 +1149,26 @@ def generate_transcript(channel, messages, guild):
                     f'{bdg}<span class="ts">{ts}</span></div>') if not same else ""
         msgs_html += (f'<div class="mg{"" if not same else " sa"}">'
                       f'{av_html}<div class="mc">{hdr_html}<div class="mt">{txt}</div>{att}{emb}</div></div>')
-    logo_html = (f'<img src="{VIREX_LOGO}" class="hl" alt="Virex" onerror="this.style.display=\'none\'">'
-                 if VIREX_LOGO and VIREX_LOGO.startswith("https://") else "")
+    logo_html = (f'<img src="{XENIX_LOGO}" class="hl" alt="Xenix" onerror="this.style.display=\'none\'">'
+                 if XENIX_LOGO and XENIX_LOGO.startswith("https://") else "")
     return f"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Transcript — {channel.name}</title>
-<style>:root{{--bg:#04080F;--s1:#070C18;--s2:#0A1020;--br:#0F1830;--bl:#1A6FFF;--blg:#4D8FFF;--tx:#D8E4FF;--mu:#4A5878;--sg:#1AE8A0;--ow:#F0A500;--bt:#5865F2}}
+<style>:root{{--bg:#0B0614;--s1:#120A22;--s2:#170D2B;--br:#2B1B4F;--bl:#8B2FFF;--blg:#B35CFF;--tx:#E7D8FF;--mu:#6A5A8A;--sg:#D0A2FF;--ow:#B35CFF;--bt:#8B2FFF}}
 *{{box-sizing:border-box;margin:0;padding:0}}body{{background:var(--bg);color:var(--tx);font-family:'Inter',sans-serif;font-size:14px;line-height:1.6}}
-.hd{{background:linear-gradient(135deg,#04080F 0%,#071228 50%,#0A1A3A 100%);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
-.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl);box-shadow:0 0 12px rgba(26,111,255,0.4)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px}}.hi p{{color:var(--mu);font-size:12px}}
+.hd{{background:linear-gradient(135deg,#0B0614 0%,#180B2E 50%,#2A1050 100%);border-bottom:1px solid var(--br);padding:24px 40px;display:flex;align-items:center;gap:20px}}
+.hl{{width:60px;height:60px;border-radius:50%;border:2px solid var(--bl);box-shadow:0 0 12px rgba(139,47,255,0.4)}}.hi h1{{font-size:24px;color:var(--bl);font-weight:800;letter-spacing:3px}}.hi p{{color:var(--mu);font-size:12px}}
 .hm{{margin-left:auto;font-size:11px;color:var(--mu)}}.hm strong{{color:var(--tx)}}
 .ms{{max-width:880px;margin:0 auto;padding:20px 40px}}.mg{{display:flex;gap:12px;padding:5px 8px;border-radius:8px;margin:1px -8px}}
 .av{{width:38px;height:38px;border-radius:50%;flex-shrink:0;border:1px solid var(--br)}}.avs{{width:38px;flex-shrink:0}}.mc{{flex:1}}
 .mh{{display:flex;align-items:center;gap:6px;margin-bottom:2px}}.un{{font-weight:600}}.ts{{font-size:10px;color:var(--mu)}}
-.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px}}.badge.staff{{background:rgba(26,110,255,.15);color:var(--blg)}}
-.badge.owner{{background:rgba(240,165,0,.15);color:var(--ow)}}.badge.bot{{background:rgba(88,101,242,.15);color:var(--bt)}}
-.mt{{color:#A0B4E0;word-break:break-word}}.att-img{{max-width:380px;border-radius:8px;margin-top:6px;display:block}}
+.badge{{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px}}.badge.staff{{background:rgba(139,47,255,.15);color:var(--blg)}}
+.badge.owner{{background:rgba(179,92,255,.15);color:var(--ow)}}.badge.bot{{background:rgba(139,47,255,.15);color:var(--bt)}}
+.mt{{color:#C4B0E8;word-break:break-word}}.att-img{{max-width:380px;border-radius:8px;margin-top:6px;display:block}}
 .emb{{margin-top:6px;background:var(--s2);border-left:4px solid var(--bl);border-radius:4px;padding:8px 12px}}
 .ft{{text-align:center;padding:36px;border-top:1px solid var(--br);color:var(--mu);font-size:11px}}</style></head>
-<body><div class="hd">{logo_html}<div class="hi"><h1>VIREX</h1><p>{cat["emoji"]} {cat["label"]} • #{channel.name}</p></div>
+<body><div class="hd">{logo_html}<div class="hi"><h1>XENIX</h1><p>{cat["emoji"]} {cat["label"]} • #{channel.name}</p></div>
 <div class="hm">Generated: <strong>{datetime.now(timezone.utc).strftime("%d/%m/%Y %H:%M")} UTC</strong></div></div>
 <div class="ms">{msgs_html}</div>
-<div class="ft"><p><a href="{VIREX_WEBSITE}" style="color:var(--bl)">{VIREX_WEBSITE}</a></p></div>
+<div class="ft"><p><a href="{XENIX_WEBSITE}" style="color:var(--bl)">{XENIX_WEBSITE}</a></p></div>
 </body></html>"""
 
 # ============================================================
@@ -1195,9 +1195,9 @@ async def close_ticket(channel, guild, closed_by=None):
             title=f"📋 Transcript — #{channel.name}",
             description=(f"**User:** {user_str}\n**Category:** {cat['emoji']} {cat['label']}\n"
                          f"**Opened:** <t:{opened_ts}:F>\n**Closed by:** {closed_str}\n**Messages:** {len(messages)}"),
-            color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+            color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
         )
-        embed.set_footer(text="Virex • Ticket System")
+        embed.set_footer(text="Xenix • Ticket System")
         set_logo(embed)
         try:
             await tr_ch.send(
@@ -1305,8 +1305,8 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str,
             "**NO MOD WILL REQUEST THE TRANSFER OF A TICKET TO DMS FOR PAYMENTS. "
             "CONTACT MANAGEMENT IF THIS HAPPENS!**"),
         color=cat["color"], timestamp=datetime.now(timezone.utc))
-    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
-        embed.set_author(name="Support Ticket", icon_url=VIREX_LOGO)
+    if XENIX_LOGO and XENIX_LOGO.startswith("https://"):
+        embed.set_author(name="Support Ticket", icon_url=XENIX_LOGO)
     else:
         embed.set_author(name="Support Ticket")
     embed.add_field(name="What is the reason for your request?",
@@ -1317,7 +1317,7 @@ async def create_ticket_channel(interaction: discord.Interaction, cat_key: str,
                     value=f"> {product}" if product else "> —", inline=False)
     if TICKET_OPEN_BANNER.startswith("https://"):
         embed.set_image(url=TICKET_OPEN_BANNER)
-    embed.set_footer(text="Virex • Premium Products 💎")
+    embed.set_footer(text="Xenix • Premium Products 💎")
 
     await channel.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
 
@@ -1326,7 +1326,7 @@ class TicketSelect(discord.ui.Select):
     def __init__(self):
         super().__init__(
             placeholder="Select a category to open a ticket...",
-            min_values=1, max_values=1, custom_id="virex_ticket_select",
+            min_values=1, max_values=1, custom_id="xenix_ticket_select",
             options=[
                 discord.SelectOption(label=v["label"], description=v["description"],
                                      emoji=v["emoji"], value=k)
@@ -1353,7 +1353,7 @@ class TicketControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="virex_close_ticket")
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="xenix_close_ticket")
     async def close_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         info = await db_get_ticket(str(interaction.channel.id))
         if not info:
@@ -1366,23 +1366,23 @@ class TicketControlView(discord.ui.View):
         await asyncio.sleep(5)
         await close_ticket(interaction.channel, interaction.guild, closed_by=interaction.user)
 
-    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="virex_claim_ticket")
+    @discord.ui.button(label="Claim Ticket", style=discord.ButtonStyle.success, emoji="✋", custom_id="xenix_claim_ticket")
     async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not is_staff(interaction.user):
             await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True)
             return
         await interaction.response.send_message(embed=discord.Embed(
-            description=f"✋ **{interaction.user.mention}** has claimed this ticket!", color=VIREX_COLOR))
+            description=f"✋ **{interaction.user.mention}** has claimed this ticket!", color=XENIX_COLOR))
 
 
 class StoreView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         self.add_item(discord.ui.Button(label="Visit Store", style=discord.ButtonStyle.link,
-                                        url=VIREX_WEBSITE, emoji="🌐", row=0))
+                                        url=XENIX_WEBSITE, emoji="🌐", row=0))
 
     @discord.ui.button(label="Open Purchase Ticket", style=discord.ButtonStyle.primary,
-                       emoji="🛒", custom_id="virex_store_ticket", row=1)
+                       emoji="🛒", custom_id="xenix_store_ticket", row=1)
     async def store_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         view   = discord.ui.View(timeout=60)
         select = TicketSelect()
@@ -1418,7 +1418,7 @@ class ApproveView(discord.ui.View):
         embed = discord.Embed(
             title="🎬 New Video Posted",
             description=f"{self.link}\n\nMake sure to like and comment on the video.\nSubscribe for more content.",
-            color=0x2F3136
+            color=0x2B1B4F
         )
         embed.set_footer(text=f"Posted by {self.author}")
         await post_channel.send(content="@everyone", embed=embed)
@@ -1454,7 +1454,7 @@ class BanRequestView(discord.ui.View):
             return None
 
     @discord.ui.button(label="✅ Approve — Lifetime Ban", style=discord.ButtonStyle.green,
-                       custom_id="virex_ban_approve")
+                       custom_id="xenix_ban_approve")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not has_admin_role(interaction.user):
             await interaction.response.send_message(
@@ -1468,16 +1468,16 @@ class BanRequestView(discord.ui.View):
         try:
             await interaction.guild.ban(discord.Object(id=uid), reason=f"Ban request approved by {interaction.user}")
             result = f"🔨 **LIFETIME BAN** — approved by {interaction.user.mention}"
-            color = 0x57F287
+            color = 0xD0A2FF
         except discord.NotFound:
             result = f"⚠️ Approved by {interaction.user.mention}, but user not found."
-            color = 0xF39C12
+            color = 0xB35CFF
         except discord.Forbidden:
             result = f"⚠️ Approved by {interaction.user.mention}, but I'm missing ban permissions."
-            color = 0xF39C12
+            color = 0xB35CFF
         except Exception as e:
             result = f"⚠️ Approved by {interaction.user.mention}, but ban failed: {e}"
-            color = 0xF39C12
+            color = 0xB35CFF
         embed = interaction.message.embeds[0]
         embed.color = color
         embed.add_field(name="📋 Decision", value=result, inline=False)
@@ -1486,7 +1486,7 @@ class BanRequestView(discord.ui.View):
         await interaction.message.edit(embed=embed, view=self)
 
     @discord.ui.button(label="❌ Deny", style=discord.ButtonStyle.red,
-                       custom_id="virex_ban_deny")
+                       custom_id="xenix_ban_deny")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not has_admin_role(interaction.user):
             await interaction.response.send_message(
@@ -1494,7 +1494,7 @@ class BanRequestView(discord.ui.View):
             return
         await interaction.response.defer()
         embed = interaction.message.embeds[0]
-        embed.color = 0x888888
+        embed.color = 0x2B1B4F
         embed.add_field(name="📋 Decision",
                         value=f"🚫 **Denied** by {interaction.user.mention} — no ban was issued.",
                         inline=False)
@@ -1781,11 +1781,11 @@ async def process_claim(member: discord.Member, guild: discord.Guild,
     # Log
     log_embed = discord.Embed(
         title="✅ Customer Role Claimed",
-        color=VIREX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc))
+        color=XENIX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc))
     log_embed.add_field(name="User",     value=f"{member.mention} (`{member.id}`)", inline=True)
     log_embed.add_field(name="Order ID", value=f"`{order_key}`", inline=True)
     log_embed.add_field(name="Email",    value=f"`{inv_email}`", inline=False)
-    log_embed.set_footer(text="Virex • Claim System")
+    log_embed.set_footer(text="Xenix • Claim System")
     await _claim_log(guild, log_embed)
 
     return True, (f"✅ **Verified!** You've been given the **{role.name}** role in **{guild.name}**.\n"
@@ -1811,7 +1811,7 @@ async def start_claim_dm(interaction: discord.Interaction):
                          "**Step 1/2 — Reply with your `Order ID`.**\n"
                          "You can find it on your SellAuth receipt / order confirmation.\n\n"
                          f"*You have {CLAIM_DM_TIMEOUT // 60} minutes. Type `cancel` to stop.*"),
-            color=VIREX_COLOR))
+            color=XENIX_COLOR))
     except discord.Forbidden:
         await interaction.response.send_message(
             "❌ I couldn't DM you. Please enable **Direct Messages** from server members "
@@ -1843,7 +1843,7 @@ async def start_claim_dm(interaction: discord.Interaction):
             title="📧 Step 2/2 — Email",
             description=("Now reply with the **email address you used for the order**.\n\n"
                          f"*Type `cancel` to stop.*"),
-            color=VIREX_COLOR))
+            color=XENIX_COLOR))
         try:
             msg_email = await bot.wait_for("message", check=check, timeout=CLAIM_DM_TIMEOUT)
         except asyncio.TimeoutError:
@@ -1879,7 +1879,7 @@ class ClaimRoleView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Claim Customer Role", style=discord.ButtonStyle.primary,
-                       emoji="🔑", custom_id="virex_claim_role")
+                       emoji="🔑", custom_id="xenix_claim_role")
     async def claim_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild is None:
             await interaction.response.send_message("❌ Use this in the server.", ephemeral=True)
@@ -1900,9 +1900,9 @@ async def cmd_claimrole(ctx: commands.Context):
                      "You'll be asked for your **Order ID** and the **email** you ordered with. "
                      "If they match a completed order that hasn't been claimed yet, you'll "
                      "instantly receive the customer role."),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc))
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc))
     set_logo(embed)
-    embed.set_footer(text="Virex • Verification System")
+    embed.set_footer(text="Xenix • Verification System")
 
     try:
         await ctx.message.delete()
@@ -1936,13 +1936,13 @@ class SuggestionModal(discord.ui.Modal):
         embed = discord.Embed(
             title="💡 New Suggestion",
             description=self.suggestion.value.strip(),
-            color=VIREX_COLOR,
+            color=XENIX_COLOR,
             timestamp=datetime.now(timezone.utc)
         )
         embed.set_author(
             name=str(interaction.user),
             icon_url=interaction.user.display_avatar.url)
-        embed.set_footer(text=f"User ID: {interaction.user.id} • Virex Suggestions")
+        embed.set_footer(text=f"User ID: {interaction.user.id} • Xenix Suggestions")
 
         try:
             msg = await channel.send(embed=embed)
@@ -1958,7 +1958,7 @@ class SuggestionModal(discord.ui.Modal):
             return
 
         await interaction.response.send_message(
-            "✅ Your suggestion has been submitted! Thanks for helping us improve Virex.",
+            "✅ Your suggestion has been submitted! Thanks for helping us improve Xenix.",
             ephemeral=True)
 
 
@@ -1967,7 +1967,7 @@ class SuggestionPanelView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Submit Suggestion", style=discord.ButtonStyle.primary,
-                       custom_id="virex_submit_suggestion")
+                       custom_id="xenix_submit_suggestion")
     async def submit_suggestion(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SuggestionModal())
 
@@ -1985,19 +1985,19 @@ async def suggestions_panel(ctx):
     embed = discord.Embed(
         title="Community Suggestions",
         description=(
-            "Help us improve Virex by submitting your ideas and feedback.\n\n"
+            "Help us improve Xenix by submitting your ideas and feedback.\n\n"
             "Suggestions that are **approved and implemented** may be rewarded "
             "with **Keys or other bonuses** at the team's discretion.\n\n"
             "Click the button below to submit your suggestion."
         ),
-        color=VIREX_COLOR
+        color=XENIX_COLOR
     )
     if SUGGESTION_BANNER:
         embed.set_image(url=SUGGESTION_BANNER)
-    if VIREX_LOGO:
-        embed.set_footer(text="Virex", icon_url=VIREX_LOGO)
+    if XENIX_LOGO:
+        embed.set_footer(text="Xenix", icon_url=XENIX_LOGO)
     else:
-        embed.set_footer(text="Virex")
+        embed.set_footer(text="Xenix")
 
     await ctx.send(embed=embed, view=SuggestionPanelView())
 
@@ -2005,9 +2005,9 @@ async def suggestions_panel(ctx):
 @bot.event
 async def on_ready():
     global whitelist_cache, silent_perm_cache
-    print(f"✅ Virex Bot online — {bot.user}")
+    print(f"✅ Xenix Bot online — {bot.user}")
 
-    await bot.change_presence(activity=discord.Game(name="virex.gg | $commands"))
+    await bot.change_presence(activity=discord.Game(name="xenix.gg | $commands"))
 
     # Whitelist-Cache laden (Moderation)
     whitelist_cache = await db_load_whitelist()
@@ -2065,7 +2065,7 @@ async def on_ready():
         bot.flask_started = True
         print("✅ Flask HTTP server started on port 8080")
 
-    print("✅ All Virex systems ready!")
+    print("✅ All Xenix systems ready!")
 
 
 @bot.event
@@ -2115,9 +2115,9 @@ async def on_message(message: discord.Message):
                     "• `spoofer` → `woofer`\n"
                     "• `hack` → `h4ck`"
                 ),
-                color=0x6f2cff
+                color=0x8B2FFF
             )
-            warn_embed.set_footer(text="Virex — Word Filter")
+            warn_embed.set_footer(text="Xenix — Word Filter")
             try:
                 await message.channel.send(
                     content=message.author.mention,
@@ -2159,7 +2159,7 @@ async def on_member_join(member: discord.Member):
             await member.ban(reason=f"Blacklisted: {reason}")
             log_channel = bot.get_channel(MESSAGE_LOG_CHANNEL_ID)
             if log_channel:
-                embed = discord.Embed(title="🔨 Auto-Ban — Blacklist", color=0xFF0000, timestamp=utcnow())
+                embed = discord.Embed(title="🔨 Auto-Ban — Blacklist", color=0x5B0FA8, timestamp=utcnow())
                 embed.add_field(name="👤 User", value=f"{member} (`{member.id}`)", inline=False)
                 embed.add_field(name="📝 Reason", value=reason, inline=False)
                 embed.set_footer(text="Auto-banned on join")
@@ -2178,27 +2178,27 @@ async def on_member_join(member: discord.Member):
     joined_ts    = int(member.joined_at.timestamp()) if member.joined_at else int(datetime.now(timezone.utc).timestamp())
     account_ts   = int(member.created_at.timestamp())
     embed = discord.Embed(
-        title="👋 Welcome to Virex!",
+        title="👋 Welcome to Xenix!",
         description=(
-            f"Hey {member.mention}, welcome to the **Virex** server! 🎉\n\n"
+            f"Hey {member.mention}, welcome to the **Xenix** server! 🎉\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "🔐 **Get started:** Verify your account to unlock all channels.\n"
-            f"🌐 **Shop:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n"
+            f"🌐 **Shop:** [{XENIX_WEBSITE}]({XENIX_WEBSITE})\n"
             "🎫 **Support:** Open a ticket if you need help.\n\n"
             "━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*You are member **#{member_count}** — glad to have you!*"
         ),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     embed.set_author(name=f"{member.display_name} joined!",
                      icon_url=member.display_avatar.url if member.display_avatar else None)
     embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
-    if VIREX_LOGO and VIREX_LOGO.startswith("https://"):
-        embed.set_image(url=VIREX_LOGO)
+    if XENIX_LOGO and XENIX_LOGO.startswith("https://"):
+        embed.set_image(url=XENIX_LOGO)
     embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>", inline=True)
     embed.add_field(name="📥 Joined Server",   value=f"<t:{joined_ts}:R>",  inline=True)
     embed.add_field(name="👥 Member Count",    value=f"`{member_count}`",   inline=True)
-    embed.set_footer(text="Virex • Welcome 🔵")
+    embed.set_footer(text="Xenix • Welcome 🔵")
     await channel.send(content=member.mention, embed=embed)
 
 
@@ -2227,14 +2227,14 @@ async def on_member_remove(member: discord.Member):
             "━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*We now have **{member_count}** members.*"
         ),
-        color=VIREX_COLOR_DANGER, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR_DANGER, timestamp=datetime.now(timezone.utc)
     )
     embed.set_author(name=f"{member.display_name} left",
                      icon_url=member.display_avatar.url if member.display_avatar else None)
     embed.set_thumbnail(url=member.display_avatar.url if member.display_avatar else None)
     embed.add_field(name="📅 Account Created", value=f"<t:{account_ts}:R>", inline=True)
     embed.add_field(name="👥 Members Now",     value=f"`{member_count}`",   inline=True)
-    embed.set_footer(text="Virex • Goodbye 🔵")
+    embed.set_footer(text="Xenix • Goodbye 🔵")
     await channel.send(embed=embed)
 
 
@@ -2243,7 +2243,7 @@ async def on_interaction(interaction: discord.Interaction):
     """Handled NUR den smedia-Ticket-Button. Alle anderen Views laufen normal weiter."""
     if interaction.type != discord.InteractionType.component:
         return
-    if not interaction.data or interaction.data.get("custom_id") != "virex_media_ticket":
+    if not interaction.data or interaction.data.get("custom_id") != "xenix_media_ticket":
         return
 
     # Defer immediately — channel creation + DB write can take >3s.
@@ -2290,13 +2290,13 @@ async def on_interaction(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎬 Media Creator Application",
         description=(f"Welcome, {interaction.user.mention}! 👋\n\n"
-                     "**You've applied for the Virex Media Creator program.**\n\n"
+                     "**You've applied for the Xenix Media Creator program.**\n\n"
                      "Please share your **channel link, follower count, average views** and any relevant clips below.\n"
                      "Our team will review your profile and get back to you shortly."),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
-    embed.set_footer(text="Virex • Media Creator Program 🎬")
+    embed.set_footer(text="Xenix • Media Creator Program 🎬")
     await ch.send(content=interaction.user.mention, embed=embed, view=TicketControlView())
 
 
@@ -2320,7 +2320,7 @@ async def commands_list(ctx):
         await ctx.message.delete()
     except (discord.Forbidden, discord.NotFound):
         pass
-    embed = discord.Embed(title="📋 Virex Bot — Command List", color=0x6f2cff)
+    embed = discord.Embed(title="📋 Xenix Bot — Command List", color=0x8B2FFF)
     embed.add_field(
         name="📌 Prefix Commands (`$`)",
         value=(
@@ -2382,7 +2382,7 @@ async def commands_list(ctx):
         inline=False
     )
     embed.add_field(name="🔇 Silent Prefix (`*`)", value="`*<text>` — Send a message anonymously", inline=False)
-    embed.set_footer(text=f"All staff commands require the {STAFF_ROLE_NAME} role • Virex Team")
+    embed.set_footer(text=f"All staff commands require the {STAFF_ROLE_NAME} role • Xenix Team")
     await ctx.send(embed=embed)
 
 # ─── BLACKLIST PREFIX COMMANDS ────────────────────────────────────────────────
@@ -2395,13 +2395,13 @@ async def blacklist_user(ctx, user_id: str = None, *, reason: str = None):
     except (discord.Forbidden, discord.NotFound):
         pass
     if not user_id or not reason:
-        embed = discord.Embed(title="❌ Incorrect Usage", description="Usage: `$blacklist <user_id> <reason>`", color=0xFF4444)
+        embed = discord.Embed(title="❌ Incorrect Usage", description="Usage: `$blacklist <user_id> <reason>`", color=0x5B0FA8)
         await ctx.send(embed=embed, delete_after=10)
         return
     try:
         uid = int(user_id)
     except ValueError:
-        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0x5B0FA8), delete_after=10)
         return
     try:
         user = await bot.fetch_user(uid)
@@ -2422,17 +2422,17 @@ async def blacklist_user(ctx, user_id: str = None, *, reason: str = None):
             ban_status = "⚠️ Could not ban user (missing permissions)"
         except Exception as e:
             ban_status = f"⚠️ Could not ban user: {e}"
-        embed = discord.Embed(title="✅ User Blacklisted", color=0xFF0000)
+        embed = discord.Embed(title="✅ User Blacklisted", color=0x5B0FA8)
         embed.add_field(name="👤 User", value=user_display, inline=False)
         embed.add_field(name="📝 Reason", value=reason, inline=False)
         embed.add_field(name="⏰ Timestamp", value=utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
         embed.add_field(name="🔨 Ban Status", value=ban_status, inline=False)
         if avatar:
             embed.set_thumbnail(url=avatar)
-        embed.set_footer(text=f"Blacklisted by {ctx.author} • Virex Team")
+        embed.set_footer(text=f"Blacklisted by {ctx.author} • Xenix Team")
         await ctx.send(embed=embed)
     else:
-        await ctx.send(embed=discord.Embed(title="❌ Database Error", description="Failed to add user to blacklist.", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Database Error", description="Failed to add user to blacklist.", color=0x5B0FA8), delete_after=10)
 
 
 @bot.command(name="unblacklist")
@@ -2444,15 +2444,15 @@ async def unblacklist_user(ctx, user_id: str = None):
     except (discord.Forbidden, discord.NotFound):
         pass
     if not user_id:
-        await ctx.send(embed=discord.Embed(title="❌ Incorrect Usage", description="Usage: `$unblacklist <user_id>`", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Incorrect Usage", description="Usage: `$unblacklist <user_id>`", color=0x5B0FA8), delete_after=10)
         return
     try:
         uid = int(user_id)
     except ValueError:
-        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0x5B0FA8), delete_after=10)
         return
     if not await is_blacklisted(uid):
-        await ctx.send(embed=discord.Embed(title="❌ Not Blacklisted", description=f"User `{uid}` is not on the blacklist.", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Not Blacklisted", description=f"User `{uid}` is not on the blacklist.", color=0x5B0FA8), delete_after=10)
         return
     entry = await get_blacklist_entry(uid)
     success = await remove_from_blacklist(uid)
@@ -2464,16 +2464,16 @@ async def unblacklist_user(ctx, user_id: str = None):
         except Exception:
             user_display = f"Unknown User (`{uid}`)"
             avatar = None
-        embed = discord.Embed(title="✅ User Removed from Blacklist", color=0x00FF00)
+        embed = discord.Embed(title="✅ User Removed from Blacklist", color=0xD0A2FF)
         embed.add_field(name="👤 User", value=user_display, inline=False)
         embed.add_field(name="📝 Previous Reason", value=entry['reason'], inline=False)
         embed.add_field(name="⏰ Was Blacklisted Since", value=entry['blacklisted_at'].strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
         if avatar:
             embed.set_thumbnail(url=avatar)
-        embed.set_footer(text=f"Removed by {ctx.author} • Virex Team")
+        embed.set_footer(text=f"Removed by {ctx.author} • Xenix Team")
         await ctx.send(embed=embed)
     else:
-        await ctx.send(embed=discord.Embed(title="❌ Database Error", description="Failed to remove user from blacklist.", color=0xFF4444), delete_after=10)
+        await ctx.send(embed=discord.Embed(title="❌ Database Error", description="Failed to remove user from blacklist.", color=0x5B0FA8), delete_after=10)
 
 
 @bot.command(name="blist")
@@ -2486,13 +2486,13 @@ async def list_blacklist(ctx):
         pass
     records = await get_blacklist(ctx.guild.id)
     if not records:
-        await ctx.send(embed=discord.Embed(title="📋 Blacklist", description="No users are currently blacklisted.", color=0x57F287))
+        await ctx.send(embed=discord.Embed(title="📋 Blacklist", description="No users are currently blacklisted.", color=0xD0A2FF))
         return
     embeds = []
     items_per_page = 5
     for i in range(0, len(records), items_per_page):
         chunk = records[i:i + items_per_page]
-        embed = discord.Embed(title=f"📋 Blacklist — Page {len(embeds) + 1}", color=0xFF0000)
+        embed = discord.Embed(title=f"📋 Blacklist — Page {len(embeds) + 1}", color=0x5B0FA8)
         for record in chunk:
             try:
                 user = await bot.fetch_user(record['user_id'])
@@ -2511,7 +2511,7 @@ async def list_blacklist(ctx):
                 f"**Date:** {record['blacklisted_at'].strftime('%d.%m.%Y at %H:%M:%S UTC')}"
             )
             embed.add_field(name=user_display, value=value, inline=False)
-        embed.set_footer(text=f"Total: {len(records)} user(s) • Virex Team")
+        embed.set_footer(text=f"Total: {len(records)} user(s) • Xenix Team")
         embeds.append(embed)
     if embeds:
         await ctx.send(embed=embeds[0])
@@ -2525,10 +2525,10 @@ async def manual(ctx):
         await ctx.message.delete()
     except (discord.Forbidden, discord.NotFound):
         pass
-    embed = discord.Embed(title="📖 AnyDesk Manual — Virex", color=0x5865F2)
+    embed = discord.Embed(title="📖 AnyDesk Manual — Xenix", color=0x8B2FFF)
     embed.add_field(name="💰 Perm Guide Assistance", value="For **€20** you can hire a Staff member *(NOT Trial Staff)* to perform the Perm Guide for you via **AnyDesk**.", inline=False)
     embed.add_field(name="⚠️ Note", value="This is different from the ASUS Manual.", inline=False)
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 
@@ -2546,7 +2546,7 @@ async def msinfo(ctx):
             "If your **msinfo32** (System Information) is not working, showing "
             "errors, or won't open correctly, our staff can fix it for you."
         ),
-        color=0x5865F2
+        color=0x8B2FFF
     )
     embed.add_field(
         name="💰 Price",
@@ -2567,7 +2567,7 @@ async def msinfo(ctx):
         value="Open a support ticket and let a Staff member know you want the **msinfo32 fix**.",
         inline=False
     )
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 
@@ -2579,13 +2579,13 @@ async def activate(ctx):
         await ctx.message.delete()
     except (discord.Forbidden, discord.NotFound):
         pass
-    embed = discord.Embed(title="🪟 Windows Activation Guide", description="Follow the steps below to activate Windows.", color=0x00B4D8)
+    embed = discord.Embed(title="🪟 Windows Activation Guide", description="Follow the steps below to activate Windows.", color=0x8B2FFF)
     embed.add_field(name="1️⃣ Open PowerShell as Administrator", value="Press Windows → type `PowerShell` → Run as Administrator", inline=False)
     embed.add_field(name="2️⃣ Run this command", value="```irm https://get.activated.win/ | iex```", inline=False)
     embed.add_field(name="3️⃣ Press `4`", value="\u200b", inline=True)
     embed.add_field(name="4️⃣ Activate Windows → `1`", value="\u200b", inline=True)
     embed.add_field(name="5️⃣ Auto-Renewal → `5`", value="\u200b", inline=True)
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 
@@ -2597,10 +2597,10 @@ async def tempvsperm(ctx):
         await ctx.message.delete()
     except (discord.Forbidden, discord.NotFound):
         pass
-    embed = discord.Embed(title="🐾 Temp vs Perm Woofer", color=0xF4A261)
+    embed = discord.Embed(title="🐾 Temp vs Perm Woofer", color=0xB35CFF)
     embed.add_field(name="🔒 Permanent Woofer", value="- Permanent serial changes\n- Requires Windows reinstall\n- Long-term security", inline=False)
     embed.add_field(name="⏳ Temporary Woofer", value="- Lasts one session\n- Resets after restart\n- No reinstall needed", inline=False)
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 
@@ -2612,11 +2612,11 @@ async def proof(ctx):
         await ctx.message.delete()
     except (discord.Forbidden, discord.NotFound):
         pass
-    embed = discord.Embed(title="📸 Submit Purchase Proof", description="Follow the instructions below carefully.", color=0x2ECC71)
+    embed = discord.Embed(title="📸 Submit Purchase Proof", description="Follow the instructions below carefully.", color=0xD0A2FF)
     embed.add_field(name="📧 Email Confirmation", value="- Screenshot your confirmation email\n- Amount & date must be visible", inline=False)
     embed.add_field(name="💳 Payment Proof", value="- Screenshot PayPal/Crypto transaction\n- Amount & recipient visible", inline=False)
     embed.add_field(name="⚠️ Important", value="Fake screenshots = permanent ban.", inline=False)
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 
@@ -2629,10 +2629,10 @@ async def ban_request(ctx, user_id: str = None, *, reason: str = None):
     except (discord.Forbidden, discord.NotFound):
         pass
     if not user_id or not reason:
-        await ctx.send(embed=discord.Embed(title="❌ Incorrect Usage", description="Usage: `$ban <user_id> <reason>`", color=0xFF4444), delete_after=5)
+        await ctx.send(embed=discord.Embed(title="❌ Incorrect Usage", description="Usage: `$ban <user_id> <reason>`", color=0x5B0FA8), delete_after=5)
         return
     if not user_id.strip().isdigit():
-        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0xFF4444), delete_after=5)
+        await ctx.send(embed=discord.Embed(title="❌ Invalid User ID", description="User ID must be a number.", color=0x5B0FA8), delete_after=5)
         return
     try:
         target_user = await bot.fetch_user(int(user_id))
@@ -2641,7 +2641,7 @@ async def ban_request(ctx, user_id: str = None, *, reason: str = None):
     except Exception:
         user_display = f"Unknown User (`{user_id}`)"
         avatar = None
-    embed = discord.Embed(title="🔨 Ban Request", color=0xFF0000)
+    embed = discord.Embed(title="🔨 Ban Request", color=0x5B0FA8)
     embed.add_field(name="👤 User", value=user_display, inline=False)
     embed.add_field(name="🛡️ Requested By", value=f"{ctx.author}", inline=False)
     embed.add_field(name="📝 Reason", value=reason, inline=False)
@@ -2654,7 +2654,7 @@ async def ban_request(ctx, user_id: str = None, *, reason: str = None):
         await ctx.send(embed=discord.Embed(
             title="✅ Ban Request Sent",
             description=f"Request sent to {ban_channel.mention} — admins can now approve or deny it.",
-            color=0x00FF00), delete_after=5)
+            color=0xD0A2FF), delete_after=5)
     else:
         await ctx.send("❌ Ban request channel not found. Set `BAN_REQUEST_CHANNEL_ID` in Railway variables.", delete_after=5)
 
@@ -2671,7 +2671,7 @@ async def scam(ctx):
         title="🚨 SCAM WARNING – PLEASE READ! 🚨",
         description=(
             "We've had reports of people sending DMs claiming that "
-            "**'Virex is a scam'** or **'detected'**.\n\n"
+            "**'Xenix is a scam'** or **'detected'**.\n\n"
             "⚠️ This is happening across multiple servers.\n\n"
             "👉 What you should do:\n"
             "🚫 Do NOT buy anything from them\n"
@@ -2679,10 +2679,10 @@ async def scam(ctx):
             "📸 Take screenshots\n"
             "🎟️ Open a support ticket"
         ),
-        color=0x6f2cff
+        color=0x8B2FFF
     )
     embed.set_image(url="https://i.imgur.com/t1JeHvA.png")
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(content="@everyone @here", embed=embed)
 
 
@@ -2706,9 +2706,9 @@ async def anydesk(ctx):
             "**Step 4: Grant Full Permissions**\n"
             "Wait for staff to connect, then grant full access."
         ),
-        color=0x2F3136
+        color=0x2B1B4F
     )
-    embed.set_footer(text="Virex Team")
+    embed.set_footer(text="Xenix Team")
     await ctx.send(embed=embed)
 
 # ============================================================
@@ -2724,7 +2724,7 @@ async def post(interaction: discord.Interaction, link: str):
     if not approve_channel:
         await interaction.response.send_message("❌ Approval channel not found.", ephemeral=True)
         return
-    embed = discord.Embed(title="📬 New Post Request", description=f"**User:** {interaction.user.mention}\n**Link:** {link}", color=0xffcc00)
+    embed = discord.Embed(title="📬 New Post Request", description=f"**User:** {interaction.user.mention}\n**Link:** {link}", color=0xB35CFF)
     embed.set_footer(text=f"Submitted by {interaction.user}")
     await approve_channel.send(embed=embed, view=ApproveView(link, interaction.user))
     await interaction.response.send_message("✅ Your post has been submitted for approval.", ephemeral=True)
@@ -2741,8 +2741,8 @@ async def changelog(interaction: discord.Interaction, game: str, update: str):
         await interaction.response.send_message("❌ Changelog channel not found.", ephemeral=True)
         return
     customer_role = discord.utils.find(lambda r: r.name.lower() == CUSTOMER_ROLE_NAME.lower(), interaction.guild.roles)
-    embed = discord.Embed(title=f"🔄 {game} — Update", description=update, color=0x6f2cff)
-    embed.set_footer(text=f"Posted by {interaction.user} • Virex Team")
+    embed = discord.Embed(title=f"🔄 {game} — Update", description=update, color=0x8B2FFF)
+    embed.set_footer(text=f"Posted by {interaction.user} • Xenix Team")
     ping_content = customer_role.mention if customer_role else f"@{CUSTOMER_ROLE_NAME}"
     await changelog_channel.send(content=ping_content, embed=embed)
     await interaction.response.send_message(f"✅ Changelog for **{game}** has been posted!", ephemeral=True)
@@ -2763,7 +2763,7 @@ async def leaderboard(interaction: discord.Interaction):
 
     embed = discord.Embed(
         title=f"🏆 {STAFF_ROLE_NAME} — Leaderboard",
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
 
@@ -2779,7 +2779,7 @@ async def leaderboard(interaction: discord.Interaction):
             lines.append(f"{rank} {name} — **{row['points']}** pts ({row['message_count']} messages)")
         embed.description = "\n".join(lines)
 
-    embed.set_footer(text=f"{POINTS_PER_MESSAGE} point(s) per message • Virex Team")
+    embed.set_footer(text=f"{POINTS_PER_MESSAGE} point(s) per message • Xenix Team")
     await interaction.followup.send(embed=embed)
 
 
@@ -2788,9 +2788,9 @@ async def guide(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📖 Vega R6 — Setup Guide",
         description=f"**[🔗 Click here to open the full guide]({R6_GUIDE_URL})**",
-        color=0x0A84FF
+        color=0x8B2FFF
     )
-    embed.set_footer(text="Virex Team • virex.gg")
+    embed.set_footer(text="Xenix Team • xenix.gg")
     await interaction.response.send_message(embed=embed)
 
 
@@ -2827,9 +2827,9 @@ async def setstatus(interaction: discord.Interaction, product: str, new_status: 
             f"**Old Status:** {STATUS_DOTS.get(old_status, '⚫')} {old_status}\n"
             f"**New Status:** {STATUS_DOTS.get(new_status, '⚫')} {new_status}"
         ),
-        color=STATUS_COLORS.get(new_status, 0x888888)
+        color=STATUS_COLORS.get(new_status, 0x2B1B4F)
     )
-    embed.set_footer(text=f"Updated by {interaction.user} • Virex Team")
+    embed.set_footer(text=f"Updated by {interaction.user} • Xenix Team")
     await interaction.response.send_message(embed=embed)
 
 # ─── WHITELIST SLASH COMMANDS ─────────────────────────────────────────────────
@@ -2843,7 +2843,7 @@ async def cmd_whitelist(interaction: discord.Interaction, member: discord.Member
         embed = discord.Embed(
             title="⚠️ Already Whitelisted",
             description=f"{member.mention} is already on the whitelist.",
-            color=0xF39C12
+            color=0xB35CFF
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -2852,13 +2852,13 @@ async def cmd_whitelist(interaction: discord.Interaction, member: discord.Member
         embed = discord.Embed(
             title="✅ User Whitelisted",
             description=f"{member.mention} can now write any word without the word filter blocking them.",
-            color=0x57F287
+            color=0xD0A2FF
         )
         embed.add_field(name="👤 User",       value=f"{member} (`{member.id}`)", inline=True)
         embed.add_field(name="🛡️ Added By",   value=f"{interaction.user}",       inline=True)
         embed.add_field(name="⏰ Timestamp",  value=utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Virex — Whitelist")
+        embed.set_footer(text="Xenix — Whitelist")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Database error. Failed to whitelist user.", ephemeral=True)
@@ -2874,7 +2874,7 @@ async def cmd_unwhitelist(interaction: discord.Interaction, member: discord.Memb
         embed = discord.Embed(
             title="⚠️ Not Whitelisted",
             description=f"{member.mention} is not on the whitelist.",
-            color=0xF39C12
+            color=0xB35CFF
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -2883,12 +2883,12 @@ async def cmd_unwhitelist(interaction: discord.Interaction, member: discord.Memb
         embed = discord.Embed(
             title="🚫 Whitelist Removed",
             description=f"{member.mention} is no longer whitelisted. The word filter applies to them again.",
-            color=0xE74C3C
+            color=0x5B0FA8
         )
         embed.add_field(name="👤 User",       value=f"{member} (`{member.id}`)", inline=True)
         embed.add_field(name="🛡️ Removed By", value=f"{interaction.user}",       inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Virex — Whitelist")
+        embed.set_footer(text="Xenix — Whitelist")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message("❌ Database error. Failed to remove user from whitelist.", ephemeral=True)
@@ -2904,7 +2904,7 @@ async def cmd_whitelistview(interaction: discord.Interaction):
         embed = discord.Embed(
             title="📋 Whitelist",
             description="No users are currently whitelisted.",
-            color=0x57F287
+            color=0xD0A2FF
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -2925,9 +2925,9 @@ async def cmd_whitelistview(interaction: discord.Interaction):
     embed = discord.Embed(
         title=f"📋 Whitelist — {len(records)} user(s)",
         description="\n".join(lines),
-        color=0x57F287
+        color=0xD0A2FF
     )
-    embed.set_footer(text="These users bypass the word filter • Virex Team")
+    embed.set_footer(text="These users bypass the word filter • Xenix Team")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 # ─── SILENT-PREFIX PERMISSIONS (/perms give | take | see) — OWNER ONLY ────────
@@ -2949,7 +2949,7 @@ async def perms_give(interaction: discord.Interaction, member: discord.Member):
         embed = discord.Embed(
             title="⚠️ Already Allowed",
             description=f"{member.mention} can already use the `*` silent prefix.",
-            color=0xF39C12,
+            color=0xB35CFF,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -2958,13 +2958,13 @@ async def perms_give(interaction: discord.Interaction, member: discord.Member):
         embed = discord.Embed(
             title="✅ Silent Prefix Granted",
             description=f"{member.mention} can now use the `*` silent prefix (e.g. `*hello`).",
-            color=0x57F287,
+            color=0xD0A2FF,
         )
         embed.add_field(name="👤 User",      value=f"{member} (`{member.id}`)", inline=True)
         embed.add_field(name="🛡️ Granted By", value=f"{interaction.user}",       inline=True)
         embed.add_field(name="⏰ Timestamp", value=utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), inline=False)
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Virex — Silent Prefix Permissions")
+        embed.set_footer(text="Xenix — Silent Prefix Permissions")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
@@ -2982,7 +2982,7 @@ async def perms_take(interaction: discord.Interaction, member: discord.Member):
         embed = discord.Embed(
             title="⚠️ Not Allowed",
             description=f"{member.mention} did not have silent-prefix permission.",
-            color=0xF39C12,
+            color=0xB35CFF,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -2991,12 +2991,12 @@ async def perms_take(interaction: discord.Interaction, member: discord.Member):
         embed = discord.Embed(
             title="🚫 Silent Prefix Revoked",
             description=f"{member.mention} can no longer use the `*` silent prefix.",
-            color=0xE74C3C,
+            color=0x5B0FA8,
         )
         embed.add_field(name="👤 User",       value=f"{member} (`{member.id}`)", inline=True)
         embed.add_field(name="🛡️ Revoked By", value=f"{interaction.user}",       inline=True)
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_footer(text="Virex — Silent Prefix Permissions")
+        embed.set_footer(text="Xenix — Silent Prefix Permissions")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(
@@ -3015,7 +3015,7 @@ async def perms_see(interaction: discord.Interaction):
             title="📋 Silent Prefix Permissions",
             description="No users are currently allowed to use the `*` silent prefix.\n"
                         "*Nobody can use it right now — not even staff.*",
-            color=0x57F287,
+            color=0xD0A2FF,
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
@@ -3036,16 +3036,16 @@ async def perms_see(interaction: discord.Interaction):
     embed = discord.Embed(
         title=f"📋 Silent Prefix Permissions — {len(records)} user(s)",
         description="\n".join(lines),
-        color=0x57F287,
+        color=0xD0A2FF,
     )
-    embed.set_footer(text="Only these users can use *hello • Virex Team")
+    embed.set_footer(text="Only these users can use *hello • Xenix Team")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 bot.tree.add_command(perms_group)
 
 # ─── VOUCH COMMAND ────────────────────────────────────────────────────────────
-@bot.tree.command(name="vouch", description="Leave a vouch for Virex (customers only)")
+@bot.tree.command(name="vouch", description="Leave a vouch for Xenix (customers only)")
 @app_commands.describe(stars="Your rating (1–5 stars)", message="Your vouch message")
 @app_commands.choices(stars=[
     app_commands.Choice(name="⭐ 1 Star",          value=1),
@@ -3067,13 +3067,13 @@ async def vouch(interaction: discord.Interaction, stars: int, message: str):
     now = utcnow()
     vouch_num = vouch_counter
     vouch_counter += 1
-    embed = discord.Embed(title="New vouch created!", color=0x57F287)
+    embed = discord.Embed(title="New vouch created!", color=0xD0A2FF)
     embed.add_field(name="Stars",       value=star_display,   inline=False)
     embed.add_field(name="Vouch:",      value=message,        inline=False)
     embed.add_field(name="Vouch N°:",   value=str(vouch_num), inline=True)
     embed.add_field(name="Vouched at:", value=now.strftime("%A, %B %d, %Y %I:%M %p"), inline=True)
     embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    embed.set_footer(text=f"Vouched by {interaction.user} • Virex Team")
+    embed.set_footer(text=f"Vouched by {interaction.user} • Xenix Team")
     await vouch_channel.send(content=f"Vouched by: {interaction.user.mention}", embed=embed)
     await interaction.response.send_message("✅ Your vouch has been submitted, thank you!", ephemeral=True)
 
@@ -3163,7 +3163,7 @@ async def giveaway_reroll(interaction: discord.Interaction, channel: discord.Tex
 # ============================================================
 #  SLASH — TICKETS
 # ============================================================
-@bot.tree.command(name="panel", description="Send the Virex ticket panel (Admin only)")
+@bot.tree.command(name="panel", description="Send the Xenix ticket panel (Admin only)")
 @app_commands.guild_only()
 async def cmd_panel(interaction: discord.Interaction):
     if not is_admin(interaction.user):
@@ -3171,26 +3171,26 @@ async def cmd_panel(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(
-        title="🎫 Virex Support Tickets",
+        title="🎫 Xenix Support Tickets",
         description=("**Need help? Open a ticket below!**\n\n"
                      "🛒 **Purchase** — Help with buying a product\n"
                      "💰 **Reseller** — Apply to our reseller program\n"
                      "🔑 **Claim Key** — Claim your role or product key\n"
                      "🔒 **HWID Reset** — Reset your hardware ID\n"
                      "🎫 **Support** — General support\n\n"
-                     f"🌐 **Shop:** [{VIREX_WEBSITE}]({VIREX_WEBSITE})\n\n"
+                     f"🌐 **Shop:** [{XENIX_WEBSITE}]({XENIX_WEBSITE})\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n*Select a category from the dropdown below.*"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
-    embed.set_footer(text="Virex • Premium Products 💎")
+    embed.set_footer(text="Xenix • Premium Products 💎")
     if TICKET_PANEL_BANNER.startswith("https://"):
         embed.set_image(url=TICKET_PANEL_BANNER)
     await interaction.channel.send(embed=embed, view=TicketPanelView())
     await interaction.followup.send("✅ Panel sent!", ephemeral=True)
 
 
-@bot.tree.command(name="store", description="Send the Virex store panel (Admin only)")
+@bot.tree.command(name="store", description="Send the Xenix store panel (Admin only)")
 @app_commands.guild_only()
 async def cmd_store(interaction: discord.Interaction):
     if not is_admin(interaction.user):
@@ -3198,20 +3198,20 @@ async def cmd_store(interaction: discord.Interaction):
         return
     await interaction.response.defer(ephemeral=True)
     embed = discord.Embed(
-        title="💎 VIREX",
-        description=("**Welcome to Virex — Premium Products & Services**\n\n"
+        title="💎 XENIX",
+        description=("**Welcome to Xenix — Premium Products & Services**\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                     f"🌐 **Website (Instant Delivery):**\n[**{VIREX_WEBSITE}**]({VIREX_WEBSITE})\n\n"
+                     f"🌐 **Website (Instant Delivery):**\n[**{XENIX_WEBSITE}**]({XENIX_WEBSITE})\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                      "💳 **Payment Methods**\n\n**🖥️ Website**\n"
                      "├ 💳 Credit / Debit Card\n├  Apple Pay\n├ 🔷 iDEAL\n└ 🪙 Cryptocurrency\n\n"
                      "**🎫 Ticket Orders**\n"
                      "├ 💵 Cash App\n├ 🅿️ PayPal F&F\n├ 🎟️ Crypto Voucher\n└ 🟡 Binance Giftcards\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n*Questions? Open a support ticket!*"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
-    embed.set_footer(text="Virex • Premium Products 💎")
+    embed.set_footer(text="Xenix • Premium Products 💎")
     await interaction.channel.send(embed=embed, view=StoreView())
     await interaction.followup.send("✅ Store panel sent!", ephemeral=True)
 
@@ -3244,7 +3244,7 @@ async def cmd_add(interaction: discord.Interaction, user: discord.Member):
         return
     await interaction.channel.set_permissions(user, view_channel=True, send_messages=True, read_message_history=True)
     await interaction.response.send_message(
-        embed=discord.Embed(description=f"✅ {user.mention} added.", color=VIREX_COLOR_SUCCESS))
+        embed=discord.Embed(description=f"✅ {user.mention} added.", color=XENIX_COLOR_SUCCESS))
 
 
 @bot.tree.command(name="remove", description="Remove a user from the current ticket (Staff only)")
@@ -3260,7 +3260,7 @@ async def cmd_remove(interaction: discord.Interaction, user: discord.Member):
         return
     await interaction.channel.set_permissions(user, overwrite=None)
     await interaction.response.send_message(
-        embed=discord.Embed(description=f"✅ {user.mention} removed.", color=VIREX_COLOR_DANGER))
+        embed=discord.Embed(description=f"✅ {user.mention} removed.", color=XENIX_COLOR_DANGER))
 
 
 @bot.tree.command(name="rename", description="Rename the current ticket (Staff only)")
@@ -3293,7 +3293,7 @@ async def cmd_rename(interaction: discord.Interaction, name: str):
 
     await interaction.response.send_message(embed=discord.Embed(
         description=f"✏️ Ticket renamed from `{old_name}` to `{new_name}` by {interaction.user.mention}.",
-        color=VIREX_COLOR))
+        color=XENIX_COLOR))
 
 
 @bot.tree.command(name="autoclose", description="Enable or disable auto-close for this ticket (Staff only)")
@@ -3310,7 +3310,7 @@ async def cmd_autoclose(interaction: discord.Interaction, enabled: bool):
     await db_update_ticket(str(interaction.channel.id), auto_close=enabled)
     status_txt = "✅ enabled" if enabled else "❌ disabled"
     await interaction.response.send_message(
-        embed=discord.Embed(description=f"Auto-close is now **{status_txt}** for this ticket.", color=VIREX_COLOR))
+        embed=discord.Embed(description=f"Auto-close is now **{status_txt}** for this ticket.", color=XENIX_COLOR))
 
 # ============================================================
 #  SLASH — SMEDIA
@@ -3348,18 +3348,18 @@ async def cmd_smedia(
             "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
             "🎫 **If you want to apply, open a ticket below!**"
         ),
-        color=VIREX_COLOR,
+        color=XENIX_COLOR,
         timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
-    embed.set_footer(text="Virex • Media Creator Program 🎬")
+    embed.set_footer(text="Xenix • Media Creator Program 🎬")
 
     view = discord.ui.View(timeout=None)
     view.add_item(discord.ui.Button(
         label="Apply — Open a Ticket",
         style=discord.ButtonStyle.primary,
         emoji="🎫",
-        custom_id="virex_media_ticket"
+        custom_id="xenix_media_ticket"
     ))
 
     content = "@everyone" if ping_everyone else None
@@ -3390,7 +3390,7 @@ async def cmd_verifypanel(interaction: discord.Interaction):
         "&scope=identify%20guilds.join"
     )
     embed = discord.Embed(
-        title="🔐 Virex Verification",
+        title="🔐 Xenix Verification",
         description=("**Verify your Discord account to gain full access.**\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                      "🔒 **Why verify?**\n"
@@ -3401,10 +3401,10 @@ async def cmd_verifypanel(interaction: discord.Interaction):
                      "Click the button — log in with Discord on our secure page.\n\n"
                      "━━━━━━━━━━━━━━━━━━━━━━━\n"
                      "*We do not store your password or personal data.*"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     set_logo(embed)
-    embed.set_footer(text="Virex • Secure Verification 🔐")
+    embed.set_footer(text="Xenix • Secure Verification 🔐")
     await interaction.channel.send(embed=embed, view=VerifyView(oauth_url))
     await interaction.followup.send("✅ Verify panel sent!", ephemeral=True)
 
@@ -3423,13 +3423,13 @@ async def cmd_backup_restore(interaction: discord.Interaction, user_id: str):
         return
     await interaction.response.defer(ephemeral=True)
     result = await add_member_to_guild(int(user_id), interaction.guild.id)
-    colors = {"added": VIREX_COLOR_SUCCESS, "already": VIREX_COLOR,
-              "no_token": VIREX_COLOR_DANGER, "token_expired": VIREX_COLOR_WARN, "error": VIREX_COLOR_DANGER}
+    colors = {"added": XENIX_COLOR_SUCCESS, "already": XENIX_COLOR,
+              "no_token": XENIX_COLOR_DANGER, "token_expired": XENIX_COLOR_WARN, "error": XENIX_COLOR_DANGER}
     icons  = {"added": "✅", "already": "ℹ️", "no_token": "❌", "token_expired": "⚠️", "error": "❌"}
     embed  = discord.Embed(
         title=f"{icons.get(result['status'], '❓')} Backup Restore",
         description=f"**User:** <@{user_id}>\n**Result:** {result['detail']}",
-        color=colors.get(result["status"], VIREX_COLOR_SUBTLE),
+        color=colors.get(result["status"], XENIX_COLOR_SUBTLE),
         timestamp=datetime.now(timezone.utc)
     )
     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3478,7 +3478,7 @@ async def cmd_backup_restore_all(interaction: discord.Interaction):
                      f"ℹ️ **Already in server ({len(already)}):** {fmt_list(already)}\n\n"
                      f"⚠️ **Token expired ({len(expired)}):** {fmt_list(expired)}\n\n"
                      f"❌ **Failed ({len(failed)}):** {fmt_list(failed)}"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
     embed.set_footer(text=f"Restore completed • {datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')} UTC")
     await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3516,7 +3516,7 @@ async def cmd_backup_list(interaction: discord.Interaction):
     for i, ch in enumerate(chunks):
         embed = discord.Embed(
             title=f"📦 Backup List {'(cont.)' if i > 0 else ''}",
-            description="\n".join(ch), color=VIREX_COLOR
+            description="\n".join(ch), color=XENIX_COLOR
         )
         if i == 0:
             embed.set_footer(text=f"Total: {len(all_v)} users in backup")
@@ -3546,9 +3546,9 @@ async def cmd_backup_stats(interaction: discord.Interaction):
                      f"📤 **Left server:** `{left}`\n\n"
                      f"💡 *Token refresh runs every 6h — backup tokens stay alive forever.*\n"
                      f"💡 *Use `/backup_restore_all` to restore everyone to this server.*"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text="Virex • Member Backup System")
+    embed.set_footer(text="Xenix • Member Backup System")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
@@ -3578,9 +3578,9 @@ async def cmd_token_refresh_now(interaction: discord.Interaction):
                      f"✅ **Refreshed:** `{refreshed}`\n"
                      f"❌ **Failed:** `{failed}` *(user needs to re-verify)*\n"
                      f"⏭️ **Skipped:** `{skipped}` *(no refresh token stored)*"),
-        color=VIREX_COLOR, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR, timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text="Virex • Token Management")
+    embed.set_footer(text="Xenix • Token Management")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================================
@@ -3612,9 +3612,9 @@ async def cmd_migrate_json(interaction: discord.Interaction):
         title="✅ JSON → PostgreSQL Migration Complete",
         description=(f"👥 **Verified users imported:** `{v_count}`\n"
                      f"🎫 **Tickets imported:** `{t_count}`"),
-        color=VIREX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc)
+        color=XENIX_COLOR_SUCCESS, timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text="Virex • Database Migration")
+    embed.set_footer(text="Xenix • Database Migration")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ============================================================
