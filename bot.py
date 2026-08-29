@@ -33,10 +33,10 @@ load_dotenv()
 # CONFIGURATION & CONSTANTS
 # ==========================================
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
-DEFAULT_PREFIX = os.getenv("DEFAULT_PREFIX", ".")
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_database.db")
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip().strip('"').strip("'")
+DEFAULT_PREFIX = os.getenv("DEFAULT_PREFIX", ".").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0")) if os.getenv("OWNER_ID", "0").isdigit() else 0
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_database.db").strip()
 
 COLOR_PRIMARY = 0x5865F2    # Blurple
 COLOR_SUCCESS = 0x57F287    # Green
@@ -1171,14 +1171,28 @@ async def antiping_group(ctx: commands.Context):
 
 @antiping_group.command(name="adduser")
 @commands.has_permissions(administrator=True)
-async def antiping_adduser(ctx: commands.Context, user: discord.Member, punishment: str = "delete", mute_minutes: int = 5):
-    """Protect a user from unauthorized mentions."""
+async def antiping_adduser(ctx: commands.Context, target: str, punishment: str = "delete", mute_minutes: int = 5):
+    """Protect a user from unauthorized mentions by mention or User ID."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Invalid user mention or User ID.")
+
     punishment = punishment.lower()
     if punishment not in ["delete", "warn", "mute", "kick"]:
         return await ctx.send(f"{EMOJI_ERROR} Choose punishment: `delete`, `warn`, `mute`, `kick`.")
     mute_sec = max(60, mute_minutes * 60)
-    await bot.db.add_protected_mention(ctx.guild.id, user.id, "user", punishment, mute_sec)
-    await ctx.send(f"{EMOJI_SUCCESS} Anti-Mention protection enabled for {user.mention} (**{punishment.capitalize()}**).")
+    await bot.db.add_protected_mention(ctx.guild.id, user_id, "user", punishment, mute_sec)
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            user = None
+    user_str = user.mention if user else f"ID `{user_id}`"
+    await ctx.send(f"{EMOJI_SUCCESS} Anti-Mention protection enabled for {user_str} (**{punishment.capitalize()}**).")
 
 @antiping_group.command(name="addrole")
 @commands.has_permissions(administrator=True)
@@ -1240,17 +1254,45 @@ async def antiping_list(ctx: commands.Context):
 # COMMANDS: 2. MODERATION SUITE
 # ==========================================
 
-@bot.command(name="ban")
+@bot.command(name="ban", aliases=["forceban", "hackban"])
 @commands.has_permissions(ban_members=True)
 @commands.bot_has_permissions(ban_members=True)
-async def ban(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided"):
-    """Ban a member from the server."""
-    if member.id == ctx.author.id or member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-        return await ctx.send(f"{EMOJI_ERROR} You cannot ban this user.")
-    await send_mod_notification_dm(member, ctx.guild, "Banned", reason)
-    await member.ban(reason=f"By {ctx.author} | {reason}", delete_message_days=0)
-    embed = discord.Embed(title=f"{EMOJI_HAMMER} Member Banned", description=f"**{member}** has been banned.", color=COLOR_ERROR)
-    embed.add_field(name="User", value=f"{member.mention} (`{member.id}`)", inline=True)
+async def ban(ctx: commands.Context, target: str, *, reason: str = "No reason provided"):
+    """Ban a member or user by mention or User ID (even if not on the server)."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Invalid user mention or User ID.")
+
+    if user_id == ctx.author.id:
+        return await ctx.send(f"{EMOJI_ERROR} You cannot ban yourself.")
+
+    member = ctx.guild.get_member(user_id)
+    if member:
+        if member.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
+            return await ctx.send(f"{EMOJI_ERROR} You cannot ban this user (higher or equal role).")
+        if member.top_role >= ctx.guild.me.top_role:
+            return await ctx.send(f"{EMOJI_ERROR} I cannot ban this user (their role is higher/equal to mine).")
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            user = None
+
+    if user:
+        await send_mod_notification_dm(user, ctx.guild, "Banned", reason)
+
+    try:
+        await ctx.guild.ban(discord.Object(id=user_id), reason=f"By {ctx.author} | {reason}", delete_message_days=0)
+    except Exception as e:
+        return await ctx.send(f"{EMOJI_ERROR} Failed to ban ID `{user_id}`: {e}")
+
+    user_display = f"**{user}** (`{user_id}`)" if user else f"User ID `{user_id}`"
+    embed = discord.Embed(title=f"{EMOJI_HAMMER} Member Banned", description=f"{user_display} has been banned.", color=COLOR_ERROR)
+    embed.add_field(name="Target", value=user_display, inline=True)
     embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
     embed.add_field(name="Reason", value=reason, inline=False)
     await ctx.send(embed=embed)
@@ -1259,18 +1301,28 @@ async def ban(ctx: commands.Context, member: discord.Member, *, reason: str = "N
 @bot.command(name="unban")
 @commands.has_permissions(ban_members=True)
 @commands.bot_has_permissions(ban_members=True)
-async def unban(ctx: commands.Context, user_id: str, *, reason: str = "No reason provided"):
-    """Unban a user by ID."""
-    clean_id = user_id.replace("<@", "").replace(">", "").replace("!", "")
+async def unban(ctx: commands.Context, target: str, *, reason: str = "No reason provided"):
+    """Unban a user by mention, ID or Username."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
     banned_user = None
     async for entry in ctx.guild.bans():
-        if str(entry.user.id) == clean_id or str(entry.user) == user_id:
+        if str(entry.user.id) == clean_id or str(entry.user) == target:
             banned_user = entry.user
             break
+
     if not banned_user:
-        return await ctx.send(f"{EMOJI_ERROR} User `{user_id}` not found in ban list.")
-    await ctx.guild.unban(banned_user, reason=f"By {ctx.author} | {reason}")
-    embed = discord.Embed(title=f"{EMOJI_SUCCESS} Member Unbanned", description=f"**{banned_user}** unbanned.", color=COLOR_SUCCESS)
+        try:
+            uid = int(clean_id)
+            banned_user = discord.Object(id=uid)
+        except ValueError:
+            return await ctx.send(f"{EMOJI_ERROR} User `{target}` not found in ban list.")
+
+    try:
+        await ctx.guild.unban(banned_user, reason=f"By {ctx.author} | {reason}")
+    except Exception as e:
+        return await ctx.send(f"{EMOJI_ERROR} Failed to unban: {e}")
+
+    embed = discord.Embed(title=f"{EMOJI_SUCCESS} Member Unbanned", description=f"Unbanned `{target}`.", color=COLOR_SUCCESS)
     embed.add_field(name="Moderator", value=ctx.author.mention, inline=True)
     embed.add_field(name="Reason", value=reason, inline=False)
     await ctx.send(embed=embed)
@@ -1352,21 +1404,51 @@ async def unmute(ctx: commands.Context, member: discord.Member):
 
 @bot.command(name="warn")
 @commands.has_permissions(manage_messages=True)
-async def warn(ctx: commands.Context, member: discord.Member, *, reason: str = "No reason provided"):
-    """Issue a warning to a member."""
-    wid = await bot.db.add_warning(ctx.guild.id, member.id, ctx.author.id, reason)
-    await send_mod_notification_dm(member, ctx.guild, f"Warned (Case #{wid})", reason)
-    warns_count = len(await bot.db.get_warnings(ctx.guild.id, member.id))
-    await ctx.send(f"{EMOJI_WARN} Warned **{member}** (Case `#{wid}`). Total warnings: **{warns_count}**.")
+async def warn(ctx: commands.Context, target: str, *, reason: str = "No reason provided"):
+    """Issue a warning by mention or User ID (even if not on the server)."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Please provide a valid user mention or User ID.")
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            user = None
+
+    wid = await bot.db.add_warning(ctx.guild.id, user_id, ctx.author.id, reason)
+    if user:
+        await send_mod_notification_dm(user, ctx.guild, f"Warned (Case #{wid})", reason)
+
+    warns_count = len(await bot.db.get_warnings(ctx.guild.id, user_id))
+    user_str = f"**{user}** (`{user_id}`)" if user else f"User ID `{user_id}`"
+    await ctx.send(f"{EMOJI_WARN} Warned {user_str} (Case `#{wid}`). Total warnings: **{warns_count}**.")
 
 @bot.command(name="warns", aliases=["warnings"])
 @commands.has_permissions(manage_messages=True)
-async def warns(ctx: commands.Context, member: discord.Member):
-    """List warnings for a member."""
-    wlist = await bot.db.get_warnings(ctx.guild.id, member.id)
+async def warns(ctx: commands.Context, target: str):
+    """List warnings for a user by mention or User ID."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Please provide a valid user mention or User ID.")
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            user = None
+
+    wlist = await bot.db.get_warnings(ctx.guild.id, user_id)
+    user_str = f"{user}" if user else f"User ID {user_id}"
     if not wlist:
-        return await ctx.send(f"{EMOJI_INFO} **{member}** has no warnings.")
-    embed = discord.Embed(title=f"⚠️ Warnings for {member}", description=f"Total: **{len(wlist)}**", color=COLOR_WARNING)
+        return await ctx.send(f"{EMOJI_INFO} **{user_str}** has no warnings.")
+    embed = discord.Embed(title=f"⚠️ Warnings for {user_str}", description=f"Total: **{len(wlist)}**", color=COLOR_WARNING)
     for w in wlist[:10]:
         embed.add_field(name=f"Case #{w['id']}", value=f"**Mod:** <@{w['moderator_id']}>\n**Reason:** {w['reason']}", inline=False)
     await ctx.send(embed=embed)
@@ -1380,10 +1462,16 @@ async def delwarn(ctx: commands.Context, warn_id: int):
 
 @bot.command(name="clearwarns")
 @commands.has_permissions(administrator=True)
-async def clearwarns(ctx: commands.Context, member: discord.Member):
-    """Clear all warnings for a member."""
-    count = await bot.db.clear_warnings(ctx.guild.id, member.id)
-    await ctx.send(f"{EMOJI_SUCCESS} Cleared all **{count}** warnings for {member.mention}.")
+async def clearwarns(ctx: commands.Context, target: str):
+    """Clear all warnings for a user by mention or User ID."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Please provide a valid user mention or User ID.")
+
+    count = await bot.db.clear_warnings(ctx.guild.id, user_id)
+    await ctx.send(f"{EMOJI_SUCCESS} Cleared all **{count}** warnings for User ID `{user_id}`.")
 
 @bot.command(name="purge", aliases=["clear"])
 @commands.has_permissions(manage_messages=True)
@@ -1512,15 +1600,28 @@ async def role_remove(ctx: commands.Context, member: discord.Member, role: disco
 
 @bot.command(name="dm", aliases=["senddm", "pm"])
 @commands.has_permissions(manage_messages=True)
-async def dm_user(ctx: commands.Context, user: discord.User, *, message: str):
-    """Send a direct message embed to a user as the bot."""
+async def dm_user(ctx: commands.Context, target: str, *, message: str):
+    """Send a direct message to any user by mention or User ID (even if not on this server)."""
+    clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+    try:
+        user_id = int(clean_id)
+    except ValueError:
+        return await ctx.send(f"{EMOJI_ERROR} Please provide a valid user mention or User ID.")
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            return await ctx.send(f"{EMOJI_ERROR} Could not find any Discord user with ID `{user_id}`.")
+
     embed = discord.Embed(title=f"Message from {ctx.guild.name}", description=message, color=COLOR_PRIMARY, timestamp=discord.utils.utcnow())
     embed.set_footer(text=f"Sent by Staff: {ctx.author}")
     try:
         await user.send(embed=embed)
-        await ctx.send(f"{EMOJI_SUCCESS} DM delivered to **{user}**.")
+        await ctx.send(f"{EMOJI_SUCCESS} DM successfully delivered to **{user}** (`{user.id}`).")
     except Exception as e:
-        await ctx.send(f"{EMOJI_ERROR} Could not send DM (user DMs closed or blocked): `{e}`")
+        await ctx.send(f"{EMOJI_ERROR} Could not send DM to **{user}** (their DMs are closed or they don't share a connection/blocked the bot): `{e}`")
 
 @bot.command(name="reply")
 @commands.has_permissions(manage_messages=True)
@@ -1793,15 +1894,33 @@ async def botinfo(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.command(name="userinfo", aliases=["user", "whois"])
-async def userinfo(ctx: commands.Context, member: discord.Member = None):
-    """Lookup details about a user."""
-    member = member or ctx.author
-    embed = discord.Embed(title=f"👤 User Info: {member}", color=COLOR_PRIMARY)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="ID", value=f"`{member.id}`", inline=True)
-    embed.add_field(name="Bot", value="Yes" if member.bot else "No", inline=True)
-    embed.add_field(name="Joined Server", value=member.joined_at.strftime("%Y-%m-%d") if member.joined_at else "Unknown", inline=True)
-    embed.add_field(name="Account Created", value=member.created_at.strftime("%Y-%m-%d"), inline=True)
+async def userinfo(ctx: commands.Context, target: str = None):
+    """Lookup details about a user by mention or User ID (works globally)."""
+    if not target:
+        user = ctx.author
+    else:
+        clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+        try:
+            uid = int(clean_id)
+            user = bot.get_user(uid) or await bot.fetch_user(uid)
+        except Exception:
+            return await ctx.send(f"{EMOJI_ERROR} User not found with ID `{target}`.")
+
+    member = ctx.guild.get_member(user.id) if ctx.guild else None
+
+    embed = discord.Embed(title=f"👤 User Info: {user}", color=COLOR_PRIMARY)
+    embed.set_thumbnail(url=user.display_avatar.url)
+    embed.add_field(name="ID", value=f"`{user.id}`", inline=True)
+    embed.add_field(name="Bot", value="Yes" if user.bot else "No", inline=True)
+    embed.add_field(name="Account Created", value=user.created_at.strftime("%Y-%m-%d %H:%M"), inline=True)
+    if member:
+        embed.add_field(name="Joined Server", value=member.joined_at.strftime("%Y-%m-%d %H:%M") if member.joined_at else "Unknown", inline=True)
+        roles = [r.mention for r in member.roles if r != ctx.guild.default_role]
+        if roles:
+            embed.add_field(name=f"Roles [{len(roles)}]", value=", ".join(roles)[:1024], inline=False)
+    else:
+        embed.add_field(name="Server Status", value="Not in this server", inline=True)
+
     await ctx.send(embed=embed)
 
 @bot.command(name="serverinfo", aliases=["server"])
@@ -1818,22 +1937,44 @@ async def serverinfo(ctx: commands.Context):
     await ctx.send(embed=embed)
 
 @bot.command(name="avatar", aliases=["av", "pfp"])
-async def avatar(ctx: commands.Context, member: discord.Member = None):
-    """View a member's avatar."""
-    member = member or ctx.author
-    embed = discord.Embed(title=f"🖼️ Avatar of {member}", color=COLOR_PRIMARY)
-    embed.set_image(url=member.display_avatar.url)
+async def avatar(ctx: commands.Context, target: str = None):
+    """View avatar of a user by mention or User ID."""
+    if not target:
+        user = ctx.author
+    else:
+        clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+        try:
+            uid = int(clean_id)
+            user = bot.get_user(uid) or await bot.fetch_user(uid)
+        except Exception:
+            return await ctx.send(f"{EMOJI_ERROR} User not found with ID `{target}`.")
+
+    embed = discord.Embed(title=f"🖼️ Avatar of {user}", color=COLOR_PRIMARY)
+    embed.set_image(url=user.display_avatar.url)
+    embed.add_field(name="Direct Link", value=f"[Click Here]({user.display_avatar.url})")
     await ctx.send(embed=embed)
 
 @bot.command(name="banner")
-async def banner(ctx: commands.Context, user: discord.User = None):
-    """View a user's banner."""
-    user = user or ctx.author
-    fetched = await bot.fetch_user(user.id)
-    if not fetched.banner:
-        return await ctx.send(f"{EMOJI_INFO} **{user}** does not have a banner.")
+async def banner(ctx: commands.Context, target: str = None):
+    """View banner of a user by mention or User ID."""
+    if not target:
+        user_id = ctx.author.id
+    else:
+        clean_id = target.replace("<@", "").replace("<@!", "").replace(">", "").strip()
+        try:
+            user_id = int(clean_id)
+        except ValueError:
+            return await ctx.send(f"{EMOJI_ERROR} Invalid User ID.")
+
+    try:
+        user = await bot.fetch_user(user_id)
+    except Exception:
+        return await ctx.send(f"{EMOJI_ERROR} User not found with ID `{target}`.")
+
+    if not user.banner:
+        return await ctx.send(f"{EMOJI_INFO} **{user}** does not have a profile banner.")
     embed = discord.Embed(title=f"🎨 Banner of {user}", color=COLOR_PRIMARY)
-    embed.set_image(url=fetched.banner.url)
+    embed.set_image(url=user.banner.url)
     await ctx.send(embed=embed)
 
 @bot.command(name="roleinfo")
